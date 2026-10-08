@@ -154,11 +154,12 @@ def _record_error(msg):
     """The failure goes into the state file; if that fails too, into a capped sidecar log."""
     now = int(time.time())
     try:
-        d, problem = _read()
-        if problem in (None, "missing"):
-            d["last_error"] = {"at": now, "msg": str(msg)[:300]}
-            _save(d)
-            return
+        with _Lock():
+            d, problem = _read()
+            if problem in (None, "missing"):
+                d["last_error"] = {"at": now, "msg": str(msg)[:300]}
+                _save(d)
+                return
     except Exception:
         pass
     try:
@@ -230,11 +231,18 @@ def _update_locked(payload, now):
         d["last_error"] = {"at": int(now), "msg": ("rate_limits present, no window parsed; keys=%s rejected=%s"
                                                    % (sorted(map(str, rl))[:10], bad))[:300]}
     changed = False
+    seen = d.get("received_at") if isinstance(d.get("received_at"), dict) else {}
     for w, new in got.items():
         old = d.get(w)
         if not _valid(old) or (new["resets_at"], new["used_percentage"]) > (old["resets_at"], old["used_percentage"]):
             d[w], changed = new, True
-    if changed:
+        seen[w] = int(now)  # this window is still being SENT (a window no longer sent goes stale on its own)
+    d["received_at"] = seen
+    if changed and problem == "corrupt":
+        # first sighting after a damaged state may be an idle session's replay: no fresh point until a number moves.
+        # A MISSING state (first install) is taken as fresh -- otherwise every new user starts with "<=".
+        d.pop("updated_at", None)
+    elif changed:
         d["updated_at"] = int(now)
     d["last_ok_at"] = int(now)
     _save(d)
@@ -268,11 +276,15 @@ def read_state(now=None, max_age_s=None):
                     "last_rejected": d.get("last_rejected") or None, "orphan_tmp": _orphans(now),
                     "recovered_from_corrupt_at": d.get("recovered_from_corrupt_at")}}
     upd = _num(d.get("updated_at"))
+    rec = d.get("received_at") if isinstance(d.get("received_at"), dict) else {}
     for w in WINDOWS:
         item = d.get(w)
         if _valid(item):
-            res[w] = _judge(item["used_percentage"], item["resets_at"], upd, now, max_age_s,
-                            "tap has an unresolved error" if unresolved else None)
+            r = _num(rec.get(w))
+            why = "tap has an unresolved error" if unresolved else None
+            if r is None or now - r > max_age_s:
+                why = "this window has not been sent for over %d s" % max_age_s
+            res[w] = _judge(item["used_percentage"], item["resets_at"], upd, now, max_age_s, why)
     fb = d.get("fable")
     if isinstance(fb, dict) and _num(fb.get("used_percentage")) is not None and _num(fb.get("read_at")) is not None:
         # Fable has no machine-readable reset; when /usage printed the same reset text for Fable and the week, the
@@ -284,7 +296,7 @@ def read_state(now=None, max_age_s=None):
                             "last_seen_used_percentage": fb["used_percentage"], "remaining_percentage": None,
                             "why": "a newer weekly window has started since the Fable reading"}
         else:
-            v = _judge(fb["used_percentage"], rst, fb["read_at"], now, max_age_s * 2, None)
+            v = _judge(fb["used_percentage"], rst, fb["read_at"], now, max_age_s * 2 if rst is not None else max_age_s, None)
             if rst is None and v["status"] == "stale_reading":
                 # without a reset time an "at most" bound may outlive the window: say nothing rather than a bound
                 v = {"status": "unknown", "why": "Fable reading is old and its reset time is unknown"}
@@ -350,20 +362,29 @@ def _run_usage():
     try:
         out, _ = p.communicate(timeout=60)
     except subprocess.TimeoutExpired:
-        if os.name == "nt":
-            subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], stdin=subprocess.DEVNULL,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=0x08000000)
-        else:
-            import signal
-            try:
+        how = "process tree killed"
+        try:
+            if os.name == "nt":
+                rc = subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    creationflags=0x08000000, timeout=15).returncode
+                if rc != 0:
+                    p.kill()
+                    how = "taskkill exit %d; only the first process killed, children may remain" % rc
+            else:
+                import signal
                 os.killpg(p.pid, signal.SIGKILL)
+        except Exception as e:
+            try:
+                p.kill()
             except OSError:
                 pass
+            how = "tree kill failed (%s); only the first process killed, children may remain" % type(e).__name__
         try:
             p.communicate(timeout=5)
         except Exception:
-            pass
-        raise RuntimeError("claude -p /usage did not answer in 60 s (process tree killed)")
+            how += "; pipes still held after kill"
+        raise RuntimeError("claude -p /usage did not answer in 60 s (%s)" % how)
     return (out or b"").decode("utf-8", "replace")
 
 
@@ -376,6 +397,8 @@ def probe_usage(now=None, runner=None):
         got = parse_usage(text)
         with _Lock():
             d, problem = _read()
+            if problem == "unreadable":
+                raise OSError("state file stayed unreadable; Fable reading not stored, state kept")
             if problem == "corrupt":
                 d = {"recovered_from_corrupt_at": int(now)}
             if got["fable"] is None:
@@ -474,6 +497,7 @@ def _tally_file(path, rec):
     with open(path, "rb") as f:
         f.seek(st["offset"])
         chunk = f.read(READ_CAP)
+    st["at_eof"] = len(chunk) < READ_CAP  # everything after this read is at most one line still being written
     end = chunk.rfind(b"\n")
     if end < 0:
         if len(chunk) >= READ_CAP:  # one line longer than the cap: skip it, never stall on it
@@ -488,8 +512,11 @@ def _tally_file(path, rec):
         try:
             m = json.loads(line).get("message")
         except (ValueError, AttributeError):
+            st["bad_lines"] = st.get("bad_lines", 0) + 1
             continue
         if not isinstance(m, dict) or not isinstance(m.get("usage"), dict):
+            if isinstance(m, dict) and "usage" in m:
+                st["bad_lines"] = st.get("bad_lines", 0) + 1
             continue
         u = m["usage"]
         vals = [int(_num(u.get(k)) or 0) for k in FIELDS]
@@ -531,18 +558,20 @@ def session_tokens(transcript_path, session_id):
         _save(rec, sf)
         if problem == "missing":  # once per new session
             _prune_sessions(time.time())
-    new = cr = 0
+    if not any(os.path.exists(p) for p in files) and not rec:
+        return None  # a wrong transcript_path is not "0 tokens"
+    new = cr = bad = 0
     complete = True
     for p, st in rec.items():
         for v in st["ids"].values():
             new += v[0] + v[1] + v[2]
             cr += v[3]
-        try:
-            if os.path.getsize(p) > st["offset"] + READ_CAP:
-                complete = False
-        except OSError:
-            pass
-    return {"new": new, "cache_read": cr, "files": len(rec), "complete": complete}
+        bad += st.get("bad_lines", 0) + st.get("skipped_long_lines", 0)
+        if not st.get("at_eof", True):
+            complete = False
+    if bad:
+        complete = False  # an unreadable line may have carried tokens: the count is a lower bound
+    return {"new": new, "cache_read": cr, "files": len(rec), "complete": complete, "bad_lines": bad}
 
 
 # ---------------------------------------------------------------- rendering
@@ -646,7 +675,20 @@ def show():
             print("%s: window ended (last seen used %.1f%%), remainder unknown until a new reading"
                   % (key, v["last_seen_used_percentage"]))
         else:
-            print("%s: %s" % (key, v.get("status")))
+            print("%s: %s%s" % (key, v.get("status"), (" (%s)" % v["why"]) if v.get("why") else ""))
+    d, _ = _read()
+    le = d.get("last_error")
+    if isinstance(le, dict) and not t.get("unresolved_error"):
+        print("tap: last error (resolved since): at %s: %s" % (le.get("at"), le.get("msg")))
+    try:
+        with open(ERRLOG, encoding="utf-8") as f:
+            tail = f.read().splitlines()[-5:]
+        print("errors.log (last %d lines%s):" % (len(tail), ", log FULL -- new errors not written"
+                                                if os.path.getsize(ERRLOG) >= ERRLOG_CAP else ""))
+        for line in tail:
+            print("  " + line)
+    except OSError:
+        pass
     return 0
 
 

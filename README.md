@@ -109,7 +109,11 @@ python tests/mutants.py          # breaks the code on purpose; every break must 
   1 second the update goes ahead, and a lost update is repaired by the next reading.
 - A Fable reading is dropped (not shown as a bound) when it is old and its reset time is unknown,
   and it ends when a newer weekly window starts.
-- On a very large transcript the first count is finished over several refreshes and shown as `>=`.
+- On a very large transcript the first count is finished over several refreshes and shown as `>=`;
+  a line that cannot be read also turns the count into `>=` (a lower bound).
+- One state directory per Claude account: two logins sharing `~/.truegauge` would mix their readings --
+  give each its own `TRUEGAUGE_HOME`.
+- A transcript replaced by a different file of greater length is not detected (transcripts are append-only).
 
 ## License
 

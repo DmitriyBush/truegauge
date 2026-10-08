@@ -254,6 +254,53 @@ for _ in range(40):
 check("big transcript finished over later calls", t["complete"] is True and t["new"] == 80, t)
 tg.READ_CAP = cap
 
+
+# ---- lens 2 (2026-10-09) findings, each pinned
+fresh()
+tg.update(rl(five=(40, NOW + 7200), seven=(10, NOW + 5 * 86400)), NOW)
+for k in range(1, 5):   # five_hour stops being sent; seven_day keeps changing
+    tg.update(rl(seven=(10 + k, NOW + 5 * 86400)), NOW + 300 * k)
+s = tg.read_state(NOW + 1201, 900)
+check("window no longer sent -> stale even while another window moves", s["five_hour"]["status"] == "stale_reading", s["five_hour"])
+check("window still sent -> fresh", s["seven_day"]["status"] == "fresh", s["seven_day"])
+d = fresh()
+open(tg.STATE, "w").write("{broken")
+tg.update(rl(five=(10, NOW + 3600)), NOW)
+check("after a damaged state the first reading is not a fresh point", tg.read_state(NOW + 1)["five_hour"]["status"] == "stale_reading")
+tg.update(rl(five=(11, NOW + 3600)), NOW + 60)
+check("...and becomes fresh once a number moves", tg.read_state(NOW + 61)["five_hour"]["status"] == "fresh")
+fresh()
+tg.update(rl(seven=(19, NOW + 5 * 86400)), NOW)
+tg.probe_usage(NOW, runner=lambda: TXT)
+open(tg.STATE, "a").close()
+real_read = tg._read
+tg._read = lambda path=None: ({}, "unreadable") if (path or tg.STATE) == tg.STATE else real_read(path)
+tg.probe_usage(NOW + 10, runner=lambda: TXT)
+tg._read = real_read
+check("probe does not wipe an unreadable state", tg.read_state(NOW + 11).get("seven_day", {}).get("used_percentage") == 19)
+fresh()
+tg.probe_usage(NOW, runner=lambda: TXT.replace("Fable): 4% used \u00b7 resets Oct 14", "Fable): 4% used \u00b7 resets Oct 15"))
+check("Fable without reset: fresh at 900 s", tg.read_state(NOW + 900, 900)["fable"]["status"] == "fresh")
+check("Fable without reset: unknown at 901 s", tg.read_state(NOW + 901, 900)["fable"]["status"] == "unknown")
+d = fresh()
+tp = os.path.join(d, "t.jsonl")
+with open(tp, "w") as f:
+    for i in range(30):
+        f.write(msg("m%d" % i, 1, 0, 1, 0) + "\n")
+cap = tg.READ_CAP
+tg.READ_CAP = os.path.getsize(tp) - 50   # less than the file, more than half: the old test said "complete"
+t = tg.session_tokens(tp, "c")
+check("partial read within one cap of the end is NOT complete", t["complete"] is False, t)
+t = tg.session_tokens(tp, "c")
+check("second read reaches the end -> complete", t["complete"] is True and t["new"] == 60, t)
+tg.READ_CAP = cap
+d = fresh()
+tp = os.path.join(d, "bad.jsonl")
+open(tp, "w").write(msg("a", 1, 0, 1, 0) + "\n" + '{"message": {"usage": "oops"}}\n' + '{"usage" broken\n')
+t = tg.session_tokens(tp, "b")
+check("bad lines make the count a lower bound (>=)", t["complete"] is False and t["bad_lines"] == 2, t)
+check("missing transcript -> None, not 0", tg.session_tokens(os.path.join(d, "nope.jsonl"), "n") is None)
+
 # ---- whole status line: never raises, records the failure
 fresh()
 out = tg.statusline({"rate_limits": {"five_hour": {"used_percentage": 50, "resets_at": 10 ** 10}},
