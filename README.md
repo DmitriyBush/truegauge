@@ -25,7 +25,7 @@ truegauge follows three rules:
 
 1. **A replayed reading never wins.** Several sessions share one account. Per window, the reading with
    the later reset time and the higher usage wins; an older, lower reading from an idle session is ignored.
-2. **An unchanged reading ages.** When the numbers have not changed for 15 minutes, truegauge shows
+2. **An unchanged reading ages.** When no plan number has changed for 15 minutes, truegauge shows
    `<=78%` ("at most 78% left") instead of `78%`. Usage inside a window only grows, so the true remainder
    can only be lower.
 3. **A window that has reset says `reset`**, not the number from before the reset.
@@ -43,7 +43,8 @@ Only documented Claude Code surfaces. Your login token is never read or sent any
   subagent transcripts next to it. Each API message is counted once (Claude Code writes one message over
   several lines). Only new lines are read on each update.
 - **Fable:** the status-line JSON does not carry it. truegauge runs `claude -p /usage` in the background
-  at most once every 10 minutes (about 3 seconds, no model call, no session saved) and reads the line
+  at most once every 10 minutes (about 3.5 seconds measured; no settings or hooks loaded, no session saved,
+  no model request) and reads the line
   `Current week (Fable): N% used`. If your plan has no separate Fable allowance, the `F` part is not shown.
   Turn this off with `TRUEGAUGE_FABLE=0`.
 
@@ -103,6 +104,12 @@ python tests/mutants.py          # breaks the code on purpose; every break must 
   usage and cannot be converted into "percent of limit".
 - Each background `/usage` read creates an empty project folder for `~/.truegauge` under
   `~/.claude/projects/` (one folder, not one per read).
+- Staleness is judged by the last time ANY plan number changed, not per window.
+- Several sessions write one state file under a short lock; if the lock cannot be taken within about
+  1 second the update goes ahead, and a lost update is repaired by the next reading.
+- A Fable reading is dropped (not shown as a bound) when it is old and its reset time is unknown,
+  and it ends when a newer weekly window starts.
+- On a very large transcript the first count is finished over several refreshes and shown as `>=`.
 
 ## License
 

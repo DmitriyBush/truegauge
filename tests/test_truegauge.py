@@ -183,6 +183,77 @@ t = tg.session_tokens(tp, "s1")
 check("truncated file restarts its own count", t["new"] == 100 + 3, t)
 check("no transcript -> None", tg.session_tokens(None, "x") is None)
 
+
+# ---- lens 1 (2026-10-09) findings, each pinned
+fresh()
+tg.update(rl(seven=(90, NOW + 300)), NOW)            # week ends in 5 min
+tg.probe_usage(NOW, runner=lambda: TXT.replace("4% used", "96% used"))
+tg.update(rl(seven=(1, NOW + 300 + 7 * 86400)), NOW + 360)   # new week started; Fable reading is 6 min old
+s = tg.read_state(NOW + 361)["fable"]
+check("new week -> old Fable reading expired, not fresh", s["status"] == "expired", s)
+check("expired Fable renders 'F reset'", "F reset" in tg.render({"fable": s}, None, None))
+fresh()
+tg.update(rl(seven=(50, NOW + 3 * 86400)), NOW)      # week known at probe time ends in 3 days
+tg.probe_usage(NOW, runner=lambda: TXT.replace("4% used", "96% used"))
+tg.update(rl(seven=(1, NOW + 7 * 86400)), NOW + 60)  # the plan reset EARLY: a new week with a later reset
+s = tg.read_state(NOW + 61)["fable"]
+check("early weekly reset -> old Fable reading expired", s["status"] == "expired", s)
+fresh()
+tg.probe_usage(NOW, runner=lambda: TXT.replace("Fable): 4% used \u00b7 resets Oct 14", "Fable): 4% used \u00b7 resets Oct 15"))
+check("different reset text -> no reset time stored", tg.read_state(NOW + 10)["fable"]["resets_at"] is None)
+s = tg.read_state(NOW + 1801, 900)["fable"]
+check("old Fable reading with unknown reset -> unknown, not a bound", s["status"] == "unknown", s)
+check("unknown Fable not rendered", "F " not in tg.render({"fable": s}, None, None))
+fresh()
+tg.probe_usage(NOW, runner=lambda: "Current week (all models): 19% used \u00b7 resets Oct 14")
+check("Fable line missing but week present -> named in probe_error",
+      "no 'Current week (Fable)' line" in (tg.read_state(NOW)["_tap"].get("probe_error") or ""))
+check("stale bound rounds UP (78.4 -> <=79%)",
+      tg._pct({"status": "stale_reading", "remaining_at_most": 78.4}) == "<=79%")
+fresh()
+os.environ["TRUEGAUGE_PROBE_S"] = "120"
+calls = []
+tg.maybe_start_probe(NOW, spawn=lambda: calls.append(1))
+tg.maybe_start_probe(NOW + 200, spawn=lambda: calls.append(1))
+check("unfinished probe blocks a new one for 300 s", len(calls) == 1, calls)
+tg.maybe_start_probe(NOW + 300, spawn=lambda: calls.append(1))
+check("after 300 s a hung probe no longer blocks", len(calls) == 2, calls)
+del os.environ["TRUEGAUGE_PROBE_S"]
+
+d = fresh()
+tp = os.path.join(d, "s.jsonl")
+with open(tp, "w") as f:
+    f.write(msg("A", 1, 0, 1, 0) + "\n" + msg("B", 1, 0, 1, 0) + "\n" + msg("A", 1, 0, 9, 0) + "\n")
+t = tg.session_tokens(tp, "x")
+check("non-adjacent repeat keeps the max (A,B,A)", t["new"] == (1 + 9) + (1 + 1), t)
+with open(tp, "a") as f:
+    f.write(json.dumps({"message": {"usage": {"input_tokens": 5, "output_tokens": 5}}}) + "\n")
+    f.write(json.dumps({"message": {"usage": {"input_tokens": 5, "output_tokens": 5}}}) + "\n")
+t = tg.session_tokens(tp, "x")
+check("two messages without id counted as two", t["new"] == 12 + 20, t)
+d = fresh()
+br = os.path.join(d, "we[ird]")
+os.makedirs(os.path.join(br, "subagents"))
+tp = br + ".jsonl"
+open(tp, "w").write(msg("m", 1, 0, 1, 0) + "\n")
+open(os.path.join(br, "subagents", "a.jsonl"), "w").write(msg("s", 10, 0, 10, 0) + "\n")
+t = tg.session_tokens(tp, "y")
+check("brackets in path: subagents still found", t["new"] == 22 and t["files"] == 2, t)
+d = fresh()
+tp = os.path.join(d, "big.jsonl")
+with open(tp, "w") as f:
+    for i in range(40):
+        f.write(msg("m%d" % i, 1, 0, 1, 0) + "\n")
+cap = tg.READ_CAP
+tg.READ_CAP = 600
+t = tg.session_tokens(tp, "z")
+check("big transcript: partial read flagged incomplete", t["complete"] is False and 0 < t["new"] < 80, t)
+check("incomplete renders with >=", ">=" in tg.render({}, t, None), tg.render({}, t, None))
+for _ in range(40):
+    t = tg.session_tokens(tp, "z")
+check("big transcript finished over later calls", t["complete"] is True and t["new"] == 80, t)
+tg.READ_CAP = cap
+
 # ---- whole status line: never raises, records the failure
 fresh()
 out = tg.statusline({"rate_limits": {"five_hour": {"used_percentage": 50, "resets_at": 10 ** 10}},

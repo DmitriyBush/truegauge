@@ -31,6 +31,7 @@ Stdlib only. License: Apache-2.0.
 """
 import glob
 import json
+import math
 import os
 import re
 import shutil
@@ -107,6 +108,48 @@ def _save(d, path=None):
             time.sleep(0.02)
 
 
+class _Lock(object):
+    """Cross-process lock for read-modify-write of the state file (several sessions share one account).
+    Byte lock on a side file; the OS releases it when the process dies. Gives up after ~1 s and lets the
+    caller proceed: a lost update is bounded (the next payload repairs it), a frozen status line is not."""
+
+    def __init__(self, path=None):
+        self.path = (path or STATE) + ".lock"
+        self.f = None
+
+    def __enter__(self):
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            self.f = open(self.path, "a+b")
+            for _ in range(50):
+                try:
+                    if os.name == "nt":
+                        import msvcrt
+                        self.f.seek(0)
+                        msvcrt.locking(self.f.fileno(), msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(self.f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return self
+                except OSError:
+                    time.sleep(0.02)
+        except OSError:
+            pass
+        self.close()
+        return self
+
+    def close(self):
+        if self.f is not None:
+            try:
+                self.f.close()  # closing the handle releases the byte lock
+            except OSError:
+                pass
+            self.f = None
+
+    def __exit__(self, *a):
+        self.close()
+
+
 def _record_error(msg):
     """The failure goes into the state file; if that fails too, into a capped sidecar log."""
     now = int(time.time())
@@ -168,6 +211,11 @@ def update(payload, now=None):
     if not isinstance(payload, dict):
         raise ValueError("status-line payload is not a JSON object")
     now = time.time() if now is None else now
+    with _Lock():
+        return _update_locked(payload, now)
+
+
+def _update_locked(payload, now):
     d, problem = _read()
     if problem == "unreadable":
         raise OSError("state file stayed unreadable after retries; update skipped, old state kept")
@@ -227,12 +275,20 @@ def read_state(now=None, max_age_s=None):
                             "tap has an unresolved error" if unresolved else None)
     fb = d.get("fable")
     if isinstance(fb, dict) and _num(fb.get("used_percentage")) is not None and _num(fb.get("read_at")) is not None:
-        # Fable has no machine-readable reset time; it shares the weekly reset when /usage printed the same text.
-        rst = d["seven_day"]["resets_at"] if (fb.get("same_reset_as_week") and _valid(d.get("seven_day"))) else None
-        v = _judge(fb["used_percentage"], rst, fb["read_at"], now, max_age_s * 2, None)
-        if rst is None:
-            v["resets_at"] = None
-        res["fable"] = v
+        # Fable has no machine-readable reset; when /usage printed the same reset text for Fable and the week, the
+        # probe stored the WEEK's resets_at as known AT PROBE TIME. A later week (larger resets_at) ends the reading.
+        rst = _num(fb.get("resets_at"))
+        week = d.get("seven_day")
+        if rst is not None and _valid(week) and week["resets_at"] > rst + 3600:
+            res["fable"] = {"status": "expired", "resets_at": int(rst), "resets_in_s": int(rst - now),
+                            "last_seen_used_percentage": fb["used_percentage"], "remaining_percentage": None,
+                            "why": "a newer weekly window has started since the Fable reading"}
+        else:
+            v = _judge(fb["used_percentage"], rst, fb["read_at"], now, max_age_s * 2, None)
+            if rst is None and v["status"] == "stale_reading":
+                # without a reset time an "at most" bound may outlive the window: say nothing rather than a bound
+                v = {"status": "unknown", "why": "Fable reading is old and its reset time is unknown"}
+            res["fable"] = v
     elif isinstance(fb, dict) and fb.get("absent"):
         res["fable"] = {"status": "absent"}
     pe = d.get("probe_error")
@@ -276,85 +332,127 @@ def parse_usage(text):
     return out
 
 
+def _run_usage():
+    """`claude -p /usage` with no settings sources (no user hooks run), no session saved, no console window.
+    On timeout the WHOLE process tree is killed (on Windows `claude` is a .cmd shim: cmd.exe -> node)."""
+    exe = shutil.which("claude")
+    if not exe:
+        raise RuntimeError("claude executable not found on PATH")
+    env = dict(os.environ, MSYS_NO_PATHCONV="1")
+    kw = {}
+    if os.name == "nt":
+        kw["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+    else:
+        kw["start_new_session"] = True
+    p = subprocess.Popen([exe, "-p", "/usage", "--no-session-persistence", "--setting-sources", ""],
+                         cwd=HOME, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                         stderr=subprocess.STDOUT, **kw)
+    try:
+        out, _ = p.communicate(timeout=60)
+    except subprocess.TimeoutExpired:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=0x08000000)
+        else:
+            import signal
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except OSError:
+                pass
+        try:
+            p.communicate(timeout=5)
+        except Exception:
+            pass
+        raise RuntimeError("claude -p /usage did not answer in 60 s (process tree killed)")
+    return (out or b"").decode("utf-8", "replace")
+
+
 def probe_usage(now=None, runner=None):
-    """Run /usage once and store the Fable window. runner(cmd, cwd) -> text (injectable for tests)."""
+    """Run /usage once and store the Fable window. runner() -> text (injectable for tests)."""
     now = time.time() if now is None else now
     os.makedirs(HOME, exist_ok=True)
     try:
-        if runner is None:
-            exe = shutil.which("claude")
-            if not exe:
-                raise RuntimeError("claude executable not found on PATH")
-            env = dict(os.environ, MSYS_NO_PATHCONV="1")
-            cp = subprocess.run([exe, "-p", "/usage", "--no-session-persistence", "--setting-sources", "user"],
-                                cwd=HOME, env=env, capture_output=True, timeout=60,
-                                encoding="utf-8", errors="replace")
-            text = (cp.stdout or "") + "\n" + (cp.stderr or "")
-        else:
-            text = runner()
+        text = _run_usage() if runner is None else runner()
         got = parse_usage(text)
-        d, problem = _read()
-        if problem == "corrupt":
-            d = {"recovered_from_corrupt_at": int(now)}
-        if got["fable"] is None:
-            # no Fable line: the plan has no separate Fable window (or the text changed) -- say so, keep nothing old
-            d["fable"] = {"absent": True, "read_at": int(now)}
-            if "Current week" not in text:
-                d["probe_error"] = {"at": int(now), "msg": ("no usage lines in /usage output: %r" % text[:200])[:300]}
+        with _Lock():
+            d, problem = _read()
+            if problem == "corrupt":
+                d = {"recovered_from_corrupt_at": int(now)}
+            if got["fable"] is None:
+                # no Fable line: the plan has no separate Fable window, or the text changed -- keep nothing old
+                d["fable"] = {"absent": True, "read_at": int(now)}
+                if "Current week" not in text:
+                    d["probe_error"] = {"at": int(now), "msg": ("no usage lines in /usage output: %r" % text[:200])[:300]}
+                else:
+                    d["probe_error"] = {"at": int(now), "msg": "no 'Current week (Fable)' line in /usage output "
+                                        "(no separate Fable allowance, or the text format changed)", "info": True}
             else:
+                pct, rtext = got["fable"]
+                if not 0 <= pct <= 100:
+                    raise ValueError("Fable percentage out of range: %r" % pct)
+                week = d.get("seven_day")
+                same = bool(got["week"] and rtext and rtext == got["week"][1])
+                fb = {"used_percentage": pct, "read_at": int(now), "reset_text": rtext, "same_reset_as_week": same}
+                if same and _valid(week) and week["resets_at"] > now:
+                    fb["resets_at"] = int(week["resets_at"])  # the week known AT PROBE TIME, see read_state
+                d["fable"] = fb
                 d.pop("probe_error", None)
-        else:
-            pct, rtext = got["fable"]
-            if not 0 <= pct <= 100:
-                raise ValueError("Fable percentage out of range: %r" % pct)
-            old = d.get("fable") if isinstance(d.get("fable"), dict) else {}
-            same = bool(got["week"] and rtext and rtext == got["week"][1])
-            d["fable"] = {"used_percentage": pct, "read_at": int(now), "reset_text": rtext,
-                          "same_reset_as_week": same}
-            if _num(old.get("used_percentage")) is not None and pct < old["used_percentage"] and old.get("reset_text") == rtext:
-                d["fable"]["note"] = "lower than previous reading with the same reset text"
-            d.pop("probe_error", None)
-        d["probe_done_at"] = int(now)
-        _save(d)
-        return d.get("fable")
-    except Exception as e:
-        d, problem = _read()
-        if problem in (None, "missing"):
-            d["probe_error"] = {"at": int(now), "msg": ("%s: %s" % (type(e).__name__, e))[:300]}
             d["probe_done_at"] = int(now)
             _save(d)
-        else:
-            _record_error("probe: %s: %s" % (type(e).__name__, e))
+            return d.get("fable")
+    except Exception as e:
+        try:
+            with _Lock():
+                d, problem = _read()
+                if problem in (None, "missing"):
+                    d["probe_error"] = {"at": int(now), "msg": ("%s: %s" % (type(e).__name__, e))[:300]}
+                    d["probe_done_at"] = int(now)
+                    _save(d)
+                    return None
+        except Exception:
+            pass
+        _record_error("probe: %s: %s" % (type(e).__name__, e))
         return None
 
 
 def maybe_start_probe(now=None, spawn=None):
-    """Start the /usage probe in the background when the last one is older than TRUEGAUGE_PROBE_S."""
+    """Start the /usage probe in the background when the last one is older than TRUEGAUGE_PROBE_S.
+    A probe that started and has not finished blocks new ones for 300 s (it is killed at 60 s)."""
     if os.environ.get("TRUEGAUGE_FABLE", "1") == "0":
         return False
     now = time.time() if now is None else now
     every = max(120, _env_int("TRUEGAUGE_PROBE_S", 600))
-    d, problem = _read()
-    if problem not in (None, "missing"):
-        return False
-    last = max(_num(d.get("probe_started_at")) or 0, _num(d.get("probe_done_at")) or 0)
-    if now - last < every:
-        return False
-    d["probe_started_at"] = int(now)
-    _save(d)
+    with _Lock():
+        d, problem = _read()
+        if problem not in (None, "missing"):
+            return False
+        started = _num(d.get("probe_started_at")) or 0
+        done = _num(d.get("probe_done_at")) or 0
+        if started > done and now - started < 300:
+            return False
+        if now - max(started, done) < every:
+            return False
+        d["probe_started_at"] = int(now)
+        _save(d)
     if spawn is not None:
         spawn()
         return True
-    flags = 0
+    kw = {}
     if os.name == "nt":
-        flags = 0x00000008 | 0x00000200 | 0x08000000  # DETACHED_PROCESS | NEW_PROCESS_GROUP | NO_WINDOW
+        kw["creationflags"] = 0x08000000 | 0x00000200  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+    else:
+        kw["start_new_session"] = True
     subprocess.Popen([sys.executable, os.path.abspath(__file__), "--probe-usage"], cwd=HOME,
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     creationflags=flags, close_fds=True)
+                     close_fds=True, **kw)
     return True
 
 
 # ---------------------------------------------------------------- session tokens
+
+READ_CAP = 8 * 1024 * 1024  # bytes read per file per call; a big transcript is finished over the next calls
+FIELDS = ("input_tokens", "cache_creation_input_tokens", "output_tokens", "cache_read_input_tokens")
+
 
 def _sess_file(session_id):
     safe = re.sub(r"[^A-Za-z0-9_-]", "_", str(session_id or "unknown"))[:80]
@@ -362,75 +460,89 @@ def _sess_file(session_id):
 
 
 def _tally_file(path, rec):
-    """Read new complete lines of one JSONL; count each API message id once (a message is split over lines)."""
-    st = rec.setdefault(path, {"offset": 0, "seen": [], "pending": None, "tot": [0, 0, 0, 0]})
+    """Read new complete lines of one JSONL. Each API message id keeps the MAX of each usage field over all its
+    lines (Claude Code writes one message over several lines, not always adjacent). -> True if anything changed."""
+    st = rec.setdefault(path, {"offset": 0, "ids": {}, "noid": 0})
     try:
         size = os.path.getsize(path)
     except OSError:
-        return
+        return False
     if size < st["offset"]:  # file replaced or truncated: start over for this file
-        st.update(offset=0, seen=[], pending=None, tot=[0, 0, 0, 0])
+        st.update(offset=0, ids={}, noid=0)
     if size == st["offset"]:
-        return
+        return False
     with open(path, "rb") as f:
         f.seek(st["offset"])
-        chunk = f.read()
+        chunk = f.read(READ_CAP)
     end = chunk.rfind(b"\n")
     if end < 0:
-        return
-    seen = set(st["seen"])
-    pend = st["pending"]  # [id, in, cache_create, out, cache_read] -- the message still being written
-
-    def commit(p):
-        if p and p[0] not in seen:
-            seen.add(p[0])
-            for i in range(4):
-                st["tot"][i] += p[1 + i]
-
+        if len(chunk) >= READ_CAP:  # one line longer than the cap: skip it, never stall on it
+            st["offset"] += len(chunk)
+            st["skipped_long_lines"] = st.get("skipped_long_lines", 0) + 1
+            return True
+        return False
+    ids = st["ids"]
     for line in chunk[:end].split(b"\n"):
         if b'"usage"' not in line:
             continue
         try:
             m = json.loads(line).get("message")
-        except ValueError:
+        except (ValueError, AttributeError):
             continue
         if not isinstance(m, dict) or not isinstance(m.get("usage"), dict):
             continue
-        u, mid = m["usage"], m.get("id") or ("noid-%d" % len(seen))
-        vals = [int(_num(u.get(k)) or 0) for k in
-                ("input_tokens", "cache_creation_input_tokens", "output_tokens", "cache_read_input_tokens")]
-        if pend and pend[0] == mid:
-            pend = [mid] + [max(a, b) for a, b in zip(pend[1:], vals)]
-        else:
-            commit(pend)
-            pend = [mid] + vals
+        u = m["usage"]
+        vals = [int(_num(u.get(k)) or 0) for k in FIELDS]
+        mid = m.get("id")
+        if not isinstance(mid, str) or not mid:
+            st["noid"] += 1
+            mid = "noid-%d" % st["noid"]
+        old = ids.get(mid)
+        ids[mid] = vals if old is None else [max(a, b) for a, b in zip(old, vals)]
     st["offset"] += end + 1
-    st["pending"] = pend
-    st["seen"] = sorted(seen)
+    return True
+
+
+def _prune_sessions(now, keep_days=14):
+    """Session caches are re-buildable from the transcripts: drop caches untouched for keep_days."""
+    for p in glob.glob(os.path.join(SESS_DIR, "*.json")):
+        try:
+            if now - os.path.getmtime(p) > keep_days * 86400:
+                os.remove(p)
+        except OSError:
+            pass
 
 
 def session_tokens(transcript_path, session_id):
-    """-> {'new': in+cache_create+out, 'cache_read': n, 'files': k} for the main transcript and its subagents."""
+    """-> {'new': in+cache_create+out, 'cache_read': n, 'files': k, 'complete': bool} for the main transcript
+    and its subagents. complete=False while a large transcript is still being read (shown as '>=')."""
     if not isinstance(transcript_path, str) or not transcript_path.endswith(".jsonl"):
         return None
     sf = _sess_file(session_id)
     rec, problem = _read(sf)
     if problem not in (None, "missing"):
         rec = {}
-    files = [transcript_path] + sorted(glob.glob(os.path.join(transcript_path[:-6], "subagents", "*.jsonl")))
+    files = [transcript_path] + sorted(glob.glob(os.path.join(glob.escape(transcript_path[:-6]), "subagents", "*.jsonl")))
+    changed = False
     for p in files:
         if os.path.exists(p):
-            _tally_file(p, rec)
-    _save(rec, sf)
+            changed = _tally_file(p, rec) or changed
+    if changed:
+        _save(rec, sf)
+        if problem == "missing":  # once per new session
+            _prune_sessions(time.time())
     new = cr = 0
-    for st in rec.values():
-        tot = list(st["tot"])
-        p = st.get("pending")
-        if p and p[0] not in set(st["seen"]):
-            tot = [a + b for a, b in zip(tot, p[1:])]
-        new += tot[0] + tot[1] + tot[2]
-        cr += tot[3]
-    return {"new": new, "cache_read": cr, "files": len(rec)}
+    complete = True
+    for p, st in rec.items():
+        for v in st["ids"].values():
+            new += v[0] + v[1] + v[2]
+            cr += v[3]
+        try:
+            if os.path.getsize(p) > st["offset"] + READ_CAP:
+                complete = False
+        except OSError:
+            pass
+    return {"new": new, "cache_read": cr, "files": len(rec), "complete": complete}
 
 
 # ---------------------------------------------------------------- rendering
@@ -466,7 +578,7 @@ def fmt_tokens(n, w):
 def _pct(v):
     if v.get("status") == "fresh":
         return "%d%%" % round(v["remaining_percentage"])
-    return "<=%d%%" % round(v["remaining_at_most"])
+    return "<=%d%%" % math.ceil(v["remaining_at_most"])  # an upper bound is rounded UP, never below itself
 
 
 def render(st, tokens, ctx_pct, lang="en"):
@@ -486,7 +598,8 @@ def render(st, tokens, ctx_pct, lang="en"):
     elif fb and fb.get("status") == "expired":
         parts.append("F %s" % w["reset"])
     if tokens is not None:
-        parts.append("%s %s %s" % (w["sess"], fmt_tokens(tokens["new"], w), w["tok"]))
+        parts.append("%s %s%s %s" % (w["sess"], "" if tokens.get("complete", True) else ">=",
+                                       fmt_tokens(tokens["new"], w), w["tok"]))
     if ctx_pct is not None:
         parts.append("%s %d%%" % (w["ctx"], round(ctx_pct)))
     return " | ".join(parts)
