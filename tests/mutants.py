@@ -100,6 +100,18 @@ MUTANTS = [
     ("red: short hex colour accepted", r're.fullmatch(r"#[0-9a-fA-F]{6}", s)', r're.fullmatch(r"#[0-9a-fA-F]{3,6}", s)'),
     ("red: ansi colour changed to bright 91", r'RED_ANSI = "\033[1;31m"', r'RED_ANSI = "\033[1;91m"'),
     ("red: refused colour not reported", 'return _rgb(RED_DEFAULT_RGB), "%r (#rrggbb or ansi)" % raw', 'return _rgb(RED_DEFAULT_RGB), None'),
+    # ---- 0.2 round 3: the status line keeps its own colour settings (SF1-SF4, CR2, CR3)
+    ("red: refusal of a setting is not recorded as an error", "    if new_refusal:\n", "    if False:\n"),
+    ("red: --show judges by the shell's settings, not the status line's", "    judge = rc  # the status line's own", "    judge = {\"th\": cc[\"th\"], \"no_color\": cc[\"no_color\"]}  # the status line's own"),
+    ("red: colour config fault takes the whole line (no try/except)", "except Exception as e:  # SF4 config", "except ZeroDivisionError as e:  # SF4 config"),
+    ("red: colour paint fault takes the whole line (no try/except)", "except Exception as e:  # SF4 paint", "except ZeroDivisionError as e:  # SF4 paint"),
+    ("red: render_cfg rewritten on every call", "        if old == cfg:\n            return\n", "        if False:\n            return\n"),
+    ("red: render_cfg never saved", "        d[\"render_cfg\"] = cfg\n", "        pass\n"),
+    ("red: --show says plain yes under NO_COLOR", "                if verdict == \"yes\" and judge[\"no_color\"]:", "                if False:"),
+    ("red: spaces-only threshold is a refusal", '    s = (raw or "").strip()\n    if not s:\n        return default, None\n    if s.lower() == "off"',
+     '    s = (raw or "").strip()\n    if not (raw or ""):\n        return default, None\n    if s.lower() == "off"'),
+    ("red: spaces-only colour is a refusal", '    s = (raw or "").strip()\n    if not s:\n        return _rgb(RED_DEFAULT_RGB), None',
+     '    s = (raw or "").strip()\n    if not (raw or ""):\n        return _rgb(RED_DEFAULT_RGB), None'),
     # mutants of the TEST FILE: the fuse must not be removable without the suite going red
     ('FUSE: real-directory branch removed', '    for real in REAL_PROTECTED:', '    for real in []:', "test"),
     ('FUSE: outside-root branch removed', '    if not _inside(p, ROOT):', '    if False:', "test"),

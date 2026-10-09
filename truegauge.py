@@ -756,7 +756,11 @@ def render(st, tokens, ctx_pct, lang="en", ctx_tokens=None):
     """`4h 38% 3d 54% F4% T548K 55% Σ2.6M`: 5-hour window, week, Fable, tokens in the window now, context fill,
     session total. A group whose data is unknown is left out, never shown as 0."""
     w = WORDS.get(lang, WORDS["en"])
-    cc = color_config()
+    try:
+        cc = color_config()
+    except Exception as e:  # SF4 config: a colour fault costs the colour, never the line
+        _record_error("colour config: %s: %s" % (type(e).__name__, e))
+        cc = None
     parts = []
     for key in ("five_hour", "seven_day"):
         v = st.get(key)
@@ -765,8 +769,12 @@ def render(st, tokens, ctx_pct, lang="en", ctx_tokens=None):
         if not v or v["status"] not in ("fresh", "stale_reading"):
             continue
         group = "%s %s" % (fmt_left(v["resets_in_s"], w, days_only=(key == "seven_day")), _used(v))
-        if not cc["no_color"] and _reached(v, cc["th"][key]):
-            group = cc["sgr"] + group + RED_RESET
+        if cc is not None and not cc["no_color"]:
+            try:
+                if _reached(v, cc["th"][key]):
+                    group = cc["sgr"] + group + RED_RESET
+            except Exception as e:  # SF4 paint: the group stays without colour
+                _record_error("colour paint: %s: %s" % (type(e).__name__, e))
         parts.append(group)
     fb = st.get("fable")
     if fb and fb.get("status") in ("fresh", "stale_reading"):  # expired Fable: left out until the probe reads again
@@ -782,6 +790,40 @@ def render(st, tokens, ctx_pct, lang="en", ctx_tokens=None):
     return " ".join(parts)
 
 
+def _remember_render_cfg(cc, now):
+    """Keep the colour settings the status line ACTUALLY used (its `env` block in settings.json is invisible to a
+    shell, so --show cannot recompute them). Written only when they differ from the saved ones: the line runs often.
+    A new non-empty refusal is recorded as an error, once per change."""
+    cfg = {"th": dict(cc["th"]), "sgr": cc["sgr"], "no_color": bool(cc["no_color"]), "refused": dict(cc["refused"])}
+    with _Lock():
+        d, problem = _read()
+        if problem not in (None, "missing"):
+            return
+        old = d.get("render_cfg")
+        if old == cfg:
+            return
+        d["render_cfg"] = cfg
+        d["render_cfg_at"] = int(now)
+        _save(d)
+        new_refusal = bool(cfg["refused"]) and (not isinstance(old, dict) or old.get("refused") != cfg["refused"])
+    if new_refusal:
+        _record_error("colour setting refused (default used): %s"
+                      % "; ".join("%s=%s" % kv for kv in sorted(cfg["refused"].items())))
+
+
+def _saved_render_cfg(d):
+    """-> (cfg, at) from the state dict, or (None, None) when absent or not of the expected shape."""
+    c = d.get("render_cfg")
+    try:
+        ok = (isinstance(c, dict) and isinstance(c["sgr"], str) and isinstance(c["no_color"], bool)
+              and isinstance(c["refused"], dict) and isinstance(c["th"], dict)
+              and all(c["th"].get(k) is None or isinstance(c["th"][k], int) for k in RED_VARS)
+              and all(k in c["th"] for k in RED_VARS))
+    except KeyError:
+        ok = False
+    return (c, _num(d.get("render_cfg_at"))) if ok else (None, None)
+
+
 def statusline(payload, now=None):
     now = time.time() if now is None else now
     tokens = None
@@ -794,6 +836,10 @@ def statusline(payload, now=None):
         maybe_start_probe(now)
     except Exception as e:  # the probe is an extra; its failure must not cost the main line
         _record_error("probe start: %s: %s" % (type(e).__name__, e))
+    try:
+        _remember_render_cfg(color_config(), now)
+    except Exception as e:  # an extra; its failure must not cost the main line
+        _record_error("colour settings: %s: %s" % (type(e).__name__, e))
     st = read_state(now)
     cw = payload.get("context_window")
     ctx = _num(cw.get("used_percentage")) if isinstance(cw, dict) else None
@@ -814,6 +860,8 @@ def show():
     for k in ("unresolved_error", "last_rejected", "recovered_from_corrupt_at", "probe_error"):
         if t.get(k):
             print("tap: %s: %s" % (k, t[k]))
+    d, _ = _read()
+    rc, rc_at = _saved_render_cfg(d)
     cc = color_config()
     print("colour: thresholds 5h=%s week=%s, colour %s%s%s"
           % (_th_name(cc["th"]["five_hour"]), _th_name(cc["th"]["seven_day"]), cc["sgr"].replace("\033", "ESC"),
@@ -821,12 +869,28 @@ def show():
              "; REFUSED (default used): %s" % "; ".join("%s=%s" % kv for kv in sorted(cc["refused"].items()))
              if cc["refused"] else ""))
     print("colour: values of THIS shell; an `env` block in settings.json is seen only by the status line itself")
+    if rc is None:
+        print("status line colour: unknown (the status line has not recorded its colour settings yet)")
+    else:
+        print("status line colour: thresholds 5h=%s week=%s, colour %s%s%s -- as the status line saw it at %s"
+              % (_th_name(rc["th"]["five_hour"]), _th_name(rc["th"]["seven_day"]), rc["sgr"].replace("", "ESC"),
+                 "; NO_COLOR is set: no colour" if rc["no_color"] else "",
+                 "; REFUSED (default used): %s" % "; ".join("%s=%s" % kv for kv in sorted(rc["refused"].items()))
+                 if rc["refused"] else "",
+                 "?" if rc_at is None else datetime.fromtimestamp(rc_at).strftime("%Y-%m-%d %H:%M:%S")))
+    judge = rc  # the status line's own settings: the shell's differ whenever `env` in settings.json is used
     for key in WINDOWS + ("fable",):
         v = st.get(key)
         if not v:
             continue
         if key in RED_VARS and v.get("status") in ("fresh", "stale_reading"):
-            print("%s: past the red threshold: %s" % (key, "yes" if _reached(v, cc["th"][key]) else "no"))
+            if judge is None:
+                verdict = "unknown (the status line has not recorded its colour settings yet)"
+            else:
+                verdict = "yes" if _reached(v, judge["th"][key]) else "no"
+                if verdict == "yes" and judge["no_color"]:
+                    verdict += " (not drawn: NO_COLOR)"
+            print("%s: past the red threshold: %s" % (key, verdict))
         if v.get("status") == "fresh":
             print("%s: used %.1f%%, remaining %.1f%%, resets in %s s, fresh"
                   % (key, v["used_percentage"], v["remaining_percentage"], v["resets_in_s"]))
@@ -838,7 +902,6 @@ def show():
                   % (key, v["last_seen_used_percentage"]))
         else:
             print("%s: %s%s" % (key, v.get("status"), (" (%s)" % v["why"]) if v.get("why") else ""))
-    d, _ = _read()
     le = d.get("last_error")
     if isinstance(le, dict) and not t.get("unresolved_error"):
         print("tap: last error (resolved since): at %s: %s" % (le.get("at"), le.get("msg")))

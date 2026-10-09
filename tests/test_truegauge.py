@@ -985,6 +985,14 @@ with envset():
 
 # ---- --show: thresholds line, the shell note, per-window verdict
 out = shown({})
+check("--show: with no recorded status-line settings the verdict is unknown, not a guess from the shell",
+      "five_hour: past the red threshold: unknown (the status line has not recorded" in out, out)
+fresh()
+_n = time.time()
+tg.update(rl(five=(97.6, int(_n) + 7200), seven=(10, int(_n) + 3 * 86400)), _n)
+with envset():
+    tg._remember_render_cfg(tg.color_config(), _n)
+    out = cli("--show")[1]
 check("--show: thresholds line", "colour: thresholds 5h=98 week=99, colour ESC[1;38;2;255;0;0m" in out, out)
 check("--show: says the values are those of this shell, settings.json env seen only by the status line",
       "values of THIS shell" in out and "settings.json" in out and "status line itself" in out, out)
@@ -1037,11 +1045,11 @@ check("equivalence is not vacuous: v0.1.0 never emits an escape, 0.2 does on man
 _now = int(time.time())
 PAYLOADS = [
     {"rate_limits": {"five_hour": {"used_percentage": 97.6, "resets_at": _now + 12000},
-                     "seven_day": {"used_percentage": 99.5, "resets_at": _now + 3 * 86400}},
+                     "seven_day": {"used_percentage": 99.5, "resets_at": _now + 3 * 86400 + 1800}},
      "context_window": {"used_percentage": 55.2, "total_input_tokens": 548200}},
     {"rate_limits": {"five_hour": {"used_percentage": 100, "resets_at": _now + 12000}}},
     {"rate_limits": {"five_hour": {"used_percentage": 12, "resets_at": _now + 12000},
-                     "seven_day": {"used_percentage": 98.49, "resets_at": _now + 3 * 86400}}, "context_window": {}},
+                     "seven_day": {"used_percentage": 98.49, "resets_at": _now + 3 * 86400 + 1800}}, "context_window": {}},
     {},
 ]
 
@@ -1066,6 +1074,148 @@ check("end to end (real scripts, %d payloads): NO_COLOR=1 output == v0.1.0 byte 
 check("end to end: without NO_COLOR the stripped output == v0.1.0", ok_st)
 _c, _o = run_script(os.path.join(os.path.dirname(HERE), "truegauge.py"), PAYLOADS[0], {})
 check("end to end: payload 97.6 / 99.5 really prints two red groups", _o.decode("utf-8").count(RED) == 2, _o)
+
+# ---- review round 3 (lenses SF1-SF7, CR2, CR3, CR5): the status line keeps its own colour settings
+def sl(used, env, now, week=10):
+    """One real status-line call under colour variables `env`; returns its output."""
+    pl = rl(five=(used, int(now) + 7200), seven=(week, int(now) + 3 * 86400 + 1800))
+    with envset(**env):
+        return tg.statusline(pl, now)
+
+
+def state_now():
+    return tg._read()[0]
+
+
+def count_errors(fn):
+    """Run fn() with _record_error counted (the original still runs)."""
+    orig, calls = tg._record_error, []
+
+    def spy(msg):
+        calls.append(msg)
+        return orig(msg)
+    tg._record_error = spy
+    try:
+        fn()
+    finally:
+        tg._record_error = orig
+    return calls
+
+
+# SF1: the setting the line used is saved, only on change; a new refusal is an error once
+fresh()
+_n = time.time()
+errs = count_errors(lambda: sl(60, {"TRUEGAUGE_RED_5H": "95%"}, _n))
+rc = state_now().get("render_cfg")
+check("SF1: refused value -> default used and the refusal is saved in render_cfg",
+      isinstance(rc, dict) and "TRUEGAUGE_RED_5H" in rc["refused"] and rc["th"]["five_hour"] == 98, rc)
+check("SF1: new refusal -> exactly one error, naming the variable",
+      len(errs) == 1 and "colour setting refused" in errs[0] and "TRUEGAUGE_RED_5H" in errs[0], errs)
+check("SF1: the error reaches last_error in the state", "colour setting refused" in state_now().get("last_error", {}).get("msg", ""))
+at1 = state_now().get("render_cfg_at")
+errs = count_errors(lambda: sl(60, {"TRUEGAUGE_RED_5H": "95%"}, _n + 100))
+check("SF1: same setting again -> no second error", errs == [], errs)
+check("SF1: same setting again -> render_cfg_at not rewritten (written only on change)",
+      state_now().get("render_cfg_at") == at1 == int(_n), (state_now().get("render_cfg_at"), at1))
+errs = count_errors(lambda: sl(60, {"TRUEGAUGE_RED_5H": "50"}, _n + 200))
+rc = state_now().get("render_cfg")
+check("SF1: valid new setting -> saved, new time, no error",
+      rc["th"]["five_hour"] == 50 and rc["refused"] == {} and state_now().get("render_cfg_at") == int(_n + 200) and errs == [], (rc, errs))
+errs = count_errors(lambda: sl(60, {"TRUEGAUGE_RED_5H": "abc"}, _n + 300))
+check("SF1: a different refusal after a good setting -> one more error", len(errs) == 1, errs)
+errs = count_errors(lambda: sl(60, {"TRUEGAUGE_RED_5H": "abc"}, _n + 400))
+check("SF1: and again the same -> none", errs == [], errs)
+fresh()
+errs = count_errors(lambda: sl(60, {"NO_COLOR": "1", "TRUEGAUGE_RED_5H": "off"}, _n))
+rc = state_now().get("render_cfg")
+check("SF1: NO_COLOR and off are saved too, and are not errors",
+      rc["no_color"] is True and rc["th"]["five_hour"] is None and errs == [], (rc, errs))
+fresh()
+sl(60, {}, _n)
+check("SF1: default settings are saved (th 98 / 99, no refusals)",
+      state_now()["render_cfg"]["th"] == {"five_hour": 98, "seven_day": 99} and state_now()["render_cfg"]["refused"] == {},
+      state_now().get("render_cfg"))
+sl(61, {}, _n + 10)
+check("SF1: the next update of the state keeps render_cfg", "render_cfg" in state_now() and state_now()["render_cfg_at"] == int(_n))
+# a corrupt state is not overwritten by the saving of the settings
+fresh()
+with open(tg.STATE, "w", encoding="utf-8") as f:
+    f.write("{not json")
+tg._remember_render_cfg(tg.color_config(), _n)
+check("SF1: corrupt state -> render_cfg not written over it", open(tg.STATE, encoding="utf-8").read() == "{not json")
+
+# SF2 + CR3: --show judges by what the status line saw
+fresh()
+_n = time.time()
+sl(60, {"TRUEGAUGE_RED_5H": "50"}, _n)  # the status line (its env) has 50; this shell has nothing
+with envset():
+    out = cli("--show")[1]
+check("SF2: --show verdict follows the status line's threshold (50), not the shell's (98)",
+      "five_hour: past the red threshold: yes" in out and "unknown" not in out, out)
+check("SF2: --show labels the status-line settings with the time it saw them",
+      "status line colour: thresholds 5h=50 week=99" in out and "as the status line saw it at" in out, out)
+check("SF2: the shell's own values stay on their own line", "colour: thresholds 5h=98 week=99" in out and "values of THIS shell" in out, out)
+fresh()
+sl(60, {"TRUEGAUGE_RED_5H": "99"}, _n)
+with envset(TRUEGAUGE_RED_5H="50"):  # the shell says 50, the status line 99: 60 % is not past 99
+    out = cli("--show")[1]
+check("SF2: the shell's threshold does not decide the verdict", "five_hour: past the red threshold: no" in out, out)
+fresh()
+sl(97.6, {"NO_COLOR": "1"}, _n)
+with envset():
+    out = cli("--show")[1]
+check("CR3: NO_COLOR on the status line -> verdict 'yes (not drawn: NO_COLOR)'",
+      "five_hour: past the red threshold: yes (not drawn: NO_COLOR)" in out, out)
+fresh()
+sl(97.6, {"TRUEGAUGE_RED_5H": "95%"}, _n)
+with envset():
+    out = cli("--show")[1]
+check("SF2: a refusal on the status line is listed in --show though the shell is clean",
+      "REFUSED (default used): TRUEGAUGE_RED_5H='95%'" in out, out)
+fresh()
+tg.update(rl(five=(97.6, int(_n) + 7200)), _n)
+d = state_now()
+d["render_cfg"] = {"th": "broken"}
+tg._save(d)
+with envset():
+    out = cli("--show")[1]
+check("SF2: a damaged render_cfg reads as unknown, --show does not crash", "status line colour: unknown" in out, out)
+
+# SF4: a fault in the colour code costs the colour, not the line
+NUMS = ({"five_hour": win("fresh", 100, 7200)}, {"new": 2600000, "complete": True}, 55, "en", 548200)
+for what in ("_sgr", "color_config", "_reached"):
+    fresh()
+    orig = getattr(tg, what)
+
+    def boom(*a, **k):
+        raise RuntimeError("probe")
+    setattr(tg, what, boom)
+    try:
+        with envset():
+            errs = count_errors(lambda: R(*NUMS))
+            line = R(*NUMS)
+            _t = time.time()
+            via_main = tg.statusline(rl(five=(100, int(_t) + 7200)), _t)
+    finally:
+        setattr(tg, what, orig)
+    check("SF4: %s raises -> the line still has its numbers" % what, line == "2h 100% T548K 55% Σ2.6M", line)
+    check("SF4: %s raises -> no escape in the line" % what, "\x1b" not in line, line)
+    check("SF4: %s raises -> the error is recorded" % what, any("probe" in e for e in errs), errs)
+    check("SF4: %s raises -> the whole status line still answers" % what, "100%" in via_main and "" not in via_main, via_main)
+
+# CR2: a threshold different from the default, with spaces; a value of only spaces = not set, silently
+for var, g in (("TRUEGAUGE_RED_5H", g5), ("TRUEGAUGE_RED_7D", g7)):
+    with envset(**{var: " 97 "}):
+        check("CR2: %s=' 97 ' (not the default) -> 96.49 plain, 96.5 red" % var, RED not in g(96.49) and RED in g(96.5), (g(96.49), g(96.5)))
+    out = shown({var: " 97 "})
+    check("CR2: %s=' 97 ' -> --show silent and shows 97" % var,
+          "REFUSED" not in out and ("5h=97" in out if var.endswith("5H") else "week=97" in out), out)
+for var in ("TRUEGAUGE_RED_5H", "TRUEGAUGE_RED_7D", "TRUEGAUGE_RED_COLOR"):
+    for blank in ("  ", " ", "\t"):
+        out = shown({var: blank})
+        with envset(**{var: blank}):
+            ok = g5(97.5) == red_of("2h 98%") and g7(98.5) == red_of("3d 99%") and g5(97.49) == "2h 97%"
+        check("CR2: %s=%r (spaces only) = not set: default, --show silent" % (var, blank), ok and "REFUSED" not in out, out)
 
 print("\n%d failed" % len(fails) if fails else "\nALL PASS")
 sys.exit(1 if fails else 0)

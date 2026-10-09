@@ -137,12 +137,15 @@ tests):
 { "env": { "TRUEGAUGE_RED_5H": "95", "TRUEGAUGE_RED_7D": "off", "TRUEGAUGE_RED_COLOR": "#ff5500" } }
 ```
 
-The second path is an `export` in your shell before starting Claude Code. `python truegauge.py --show` prints the
-values of **that shell only**: an `env` block in settings.json is seen by the status line itself, not by `--show`.
+The second path is an `export` in your shell before starting Claude Code. `python truegauge.py --show` prints two
+lines: the values of **that shell**, and the settings **the status line itself last used** (it saves them in the
+state file when they change, so an `env` block in settings.json shows up there, with the time it was seen). The
+"past the red threshold" verdict follows the second one; before the status line has saved anything it says
+`unknown`. A refused value (say `"95%"`) is also written to the last error once.
 
 - `TRUEGAUGE_RED_COLOR`: `#rrggbb` (any case, default `#ff0000`) or `ansi`. `ansi` is the bold red of your terminal
   theme, so its shade depends on that theme (it can look crimson in some). A wrong value is refused like a
-  threshold. The group is closed with `ESC[22;39m` (bold off, default foreground), so nothing else is reset; the
+  threshold. The group is closed with `ESC[22;39m` (bold off, default foreground; see the last note below); the
   space between groups is never coloured.
 - `NO_COLOR`: any non-empty value turns colour off entirely, and the output is then byte for byte the same as 0.1.
   An empty value does not.
@@ -153,6 +156,16 @@ The colour follows the **raw reading**: red when the reading, rounded half up, i
 fresh reading that is the number you see. For an old one it is true too: an old `≥97%` can be red at threshold 98,
 because the reading behind it was 97.6 (shown as 98% while fresh) and usage inside a window only grows. Ageing
 changes the text (`98%` becomes `≥97%`), never the colour.
+
+What the line does **not** tell you:
+
+- With `NO_COLOR`, `off`, or a refused value there is no near-the-limit sign on the line at all: a plain `97%`
+  looks the same as a plain `40%`. `--show` tells you which of these is in force.
+- An old reading that is not red does not mean "far from the limit". `≥` means "at least": `≥95%` can be a real
+  100% that has not been read again yet.
+- The group is closed with `ESC[22;39m`, which switches off bold **and also faint**. If Claude Code draws the
+  status line faint, the items after a red group may look brighter than the rest. This is not measured in Claude
+  Code (it can only be seen in a terminal). If you cannot see the red at all, try `TRUEGAUGE_RED_COLOR=ansi`.
 
 ## Check it
 
