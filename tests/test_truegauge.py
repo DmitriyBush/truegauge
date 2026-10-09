@@ -1201,7 +1201,7 @@ for what in ("_sgr", "color_config", "_reached"):
     check("SF4: %s raises -> the line still has its numbers" % what, line == "2h 100% T548K 55% Σ2.6M", line)
     check("SF4: %s raises -> no escape in the line" % what, "\x1b" not in line, line)
     check("SF4: %s raises -> the error is recorded" % what, any("probe" in e for e in errs), errs)
-    check("SF4: %s raises -> the whole status line still answers" % what, "100%" in via_main and "" not in via_main, via_main)
+    check("SF4: %s raises -> the whole status line still answers" % what, "100%" in via_main and "\033" not in via_main, via_main)
 
 # CR2: a threshold different from the default, with spaces; a value of only spaces = not set, silently
 for var, g in (("TRUEGAUGE_RED_5H", g5), ("TRUEGAUGE_RED_7D", g7)):

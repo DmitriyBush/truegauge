@@ -873,7 +873,7 @@ def show():
         print("status line colour: unknown (the status line has not recorded its colour settings yet)")
     else:
         print("status line colour: thresholds 5h=%s week=%s, colour %s%s%s -- as the status line saw it at %s"
-              % (_th_name(rc["th"]["five_hour"]), _th_name(rc["th"]["seven_day"]), rc["sgr"].replace("", "ESC"),
+              % (_th_name(rc["th"]["five_hour"]), _th_name(rc["th"]["seven_day"]), rc["sgr"].replace("\033", "ESC"),
                  "; NO_COLOR is set: no colour" if rc["no_color"] else "",
                  "; REFUSED (default used): %s" % "; ".join("%s=%s" % kv for kv in sorted(rc["refused"].items()))
                  if rc["refused"] else "",
