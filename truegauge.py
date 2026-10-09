@@ -30,6 +30,11 @@ Modes:
   (no args)       status-line mode: read stdin JSON, update state, print one line.
   --show          what the tool would conclude NOW, with its own health.
   --probe-usage   read `claude -p /usage` once and store the Fable window (normally run in background).
+  --install       make truegauge the status line in settings.json; the previous line is saved first.
+  --uninstall     put the previous line back (or remove the key if there was none).
+  --status        is truegauge the active line in that settings.json, is a previous line saved.
+                  (all three take [--settings PATH]; default ~/.claude/settings.json or
+                  $CLAUDE_CONFIG_DIR/settings.json. Every write is preceded by a backup copy.)
 Config (environment): TRUEGAUGE_HOME (state dir, default ~/.truegauge), TRUEGAUGE_LANG (en|ru),
   TRUEGAUGE_FABLE (1|0), TRUEGAUGE_PROBE_S, TRUEGAUGE_MAX_AGE_S.
 Stdlib only. License: Apache-2.0.
@@ -759,12 +764,216 @@ def show():
     return 0
 
 
+# ---- install / uninstall: switch the status line in settings.json on and off, with a way back
+PREV_NAME = "previous_statusline.json"
+
+
+class Refuse(Exception):
+    """The operation is refused and nothing was changed."""
+
+
+def _settings_path(argv):
+    for i, a in enumerate(argv):
+        if a == "--settings":
+            if i + 1 >= len(argv) or argv[i + 1].startswith("--"):
+                raise Refuse("--settings needs a path")
+            return argv[i + 1]
+        if a.startswith("--settings="):
+            return a[len("--settings="):]
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR")
+    return os.path.join(cfg or os.path.join(os.path.expanduser("~"), ".claude"), "settings.json")
+
+
+def _read_settings(path):
+    """The settings object, or {} for a missing/empty file. Anything else that is not a JSON object: refuse."""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except FileNotFoundError:
+        return {}
+    except OSError as e:
+        raise Refuse("cannot read %s: %s" % (path, e))
+    text = raw.decode("utf-8-sig", "replace")
+    if not text.strip():
+        return {}
+    try:
+        d = json.loads(text)
+    except ValueError as e:
+        raise Refuse("%s is not valid JSON (%s); nothing changed" % (path, e))
+    if not isinstance(d, dict):
+        raise Refuse("%s is not a JSON object; nothing changed" % path)
+    return d
+
+
+def _is_ours(line):
+    cmd = line.get("command") if isinstance(line, dict) else None
+    return isinstance(cmd, str) and re.search(r"truegauge\.py", cmd) is not None
+
+
+def _prev_file():
+    return os.path.join(HOME, PREV_NAME)
+
+
+def _prev_load():
+    """{settings abspath: {"had_line": bool, "statusLine": value, "saved_at": iso}}; missing file -> {}."""
+    try:
+        with open(_prev_file(), encoding="utf-8") as f:
+            d = json.load(f)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        raise Refuse("saved previous line %s is unreadable (%s); nothing changed" % (_prev_file(), e))
+    ent = d.get("entries") if isinstance(d, dict) else None
+    if not isinstance(ent, dict):
+        raise Refuse("saved previous line %s has an unknown shape; nothing changed" % _prev_file())
+    return ent
+
+
+def _write_atomic(path, text):
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    tmp = "%s.tmp-%d" % (path, os.getpid())
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _prev_store(entries):
+    if entries:
+        _write_atomic(_prev_file(), json.dumps({"entries": entries}, ensure_ascii=False, indent=2) + "\n")
+    else:
+        try:
+            os.remove(_prev_file())
+        except FileNotFoundError:
+            pass
+
+
+def _backup(path):
+    """Copy of the settings file next to it, made before every write. None if there is no file yet."""
+    if not os.path.exists(path):
+        return None
+    base = "%s.truegauge-backup-%s" % (path, time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()))
+    dst, n = base, 1
+    while os.path.exists(dst):
+        n += 1
+        dst = "%s-%d" % (base, n)
+    try:
+        shutil.copy2(path, dst)
+    except OSError as e:
+        raise Refuse("cannot make a backup of %s (%s); nothing changed" % (path, e))
+    return dst
+
+
+def _write_settings(path, d):
+    bak = _backup(path)
+    _write_atomic(path, json.dumps(d, ensure_ascii=False, indent=2) + "\n")
+    return bak
+
+
+def _quote(p):
+    return '"%s"' % p if re.search(r"\s", p) else p
+
+
+def _our_command():
+    py = (sys.executable or "python").replace("\\", "/")
+    return "%s %s" % (_quote(py), _quote(os.path.abspath(__file__).replace("\\", "/")))
+
+
+def install(path):
+    d = _read_settings(path)
+    key = os.path.abspath(path)
+    if "statusLine" in d and _is_ours(d["statusLine"]):
+        print("truegauge is already the status line in %s. Nothing changed." % path)
+        return 0
+    entries = _prev_load()
+    entries[key] = {"had_line": "statusLine" in d, "statusLine": d.get("statusLine"),
+                    "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    _prev_store(entries)
+    d["statusLine"] = {"type": "command", "command": _our_command(), "refreshInterval": 60}
+    bak = _write_settings(path, d)
+    rec = entries[key]
+    print("truegauge is now the status line in %s" % path)
+    print("previous line: %s (saved in %s)" % (json.dumps(rec["statusLine"], ensure_ascii=False)
+                                                if rec["had_line"] else "none", _prev_file()))
+    if bak:
+        print("backup of the settings file: %s" % bak)
+    print("to undo: python %s --uninstall --settings %s" % (_quote(os.path.abspath(__file__).replace("\\", "/")),
+                                                             _quote(path)))
+    print("Open a new Claude Code session to see it.")
+    return 0
+
+
+def uninstall(path):
+    d = _read_settings(path)
+    key = os.path.abspath(path)
+    if "statusLine" not in d or not _is_ours(d["statusLine"]):
+        print("truegauge is not the status line in %s. Nothing changed." % path)
+        return 0
+    entries = _prev_load()
+    rec = entries.get(key)
+    if isinstance(rec, dict) and rec.get("had_line"):
+        d["statusLine"] = rec.get("statusLine")
+        what = "previous line restored: %s" % json.dumps(rec.get("statusLine"), ensure_ascii=False)
+    else:
+        del d["statusLine"]
+        what = ("there was no status line before: key removed" if rec else
+                "no saved previous line (truegauge was added by hand): key removed")
+    bak = _write_settings(path, d)
+    entries.pop(key, None)
+    _prev_store(entries)  # only after the settings write succeeded
+    print("truegauge is off in %s" % path)
+    print(what)
+    if bak:
+        print("backup of the settings file: %s" % bak)
+    return 0
+
+
+def status(path):
+    d = _read_settings(path)
+    ours = "statusLine" in d and _is_ours(d["statusLine"])
+    rec = _prev_load().get(os.path.abspath(path))
+    print("settings: %s%s" % (path, "" if os.path.exists(path) else " (does not exist)"))
+    print("truegauge is the active status line: %s" % ("yes" if ours else "no"))
+    if not ours and "statusLine" in d:
+        print("active line: %s" % json.dumps(d["statusLine"], ensure_ascii=False))
+    if rec is None:
+        print("previous line saved: no")
+    elif rec.get("had_line"):
+        print("previous line saved: %s" % json.dumps(rec.get("statusLine"), ensure_ascii=False))
+    else:
+        print("previous line saved: there was none (--uninstall will remove the key)")
+    return 0
+
+
+def settings_mode(argv):
+    try:
+        path = _settings_path(argv)
+        fn = install if "--install" in argv else uninstall if "--uninstall" in argv else status
+        return fn(path)
+    except Refuse as e:
+        print("truegauge: refused: %s" % e, file=sys.stderr)
+        return 2
+    except OSError as e:
+        print("truegauge: failed: %s" % e, file=sys.stderr)
+        return 2
+
+
 def main(argv):
     if "--version" in argv:
         print(__version__)
         return 0
     if "--show" in argv:
         return show()
+    if any(a in argv for a in ("--install", "--uninstall", "--status")):
+        return settings_mode(argv)
     if "--probe-usage" in argv:
         probe_usage()
         return 0

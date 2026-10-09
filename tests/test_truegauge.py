@@ -459,5 +459,239 @@ check("odd payload -> no crash, partial line", isinstance(out, str), out)
 line = tg.render({}, {"new": 240000, "cache_read": 0, "files": 1}, 23.4, "ru")
 check("ru render", line == "23% Σ240К", line)
 
+# ---- --install / --uninstall / --status on TEMP settings files only (the real settings are never touched)
+import contextlib  # noqa: E402
+import glob  # noqa: E402
+import io  # noqa: E402
+
+
+def cli(*args, cfg=None):
+    """Run main() in-process; returns (exit code, stdout, stderr). cfg sets CLAUDE_CONFIG_DIR for the call."""
+    out, err = io.StringIO(), io.StringIO()
+    old = os.environ.pop("CLAUDE_CONFIG_DIR", None)
+    if cfg:
+        os.environ["CLAUDE_CONFIG_DIR"] = cfg
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = tg.main(list(args))
+    finally:
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        if old is not None:
+            os.environ["CLAUDE_CONFIG_DIR"] = old
+    return code, out.getvalue(), err.getvalue()
+
+
+def put(path, text):
+    with open(path, "wb") as f:
+        f.write(text.encode("utf-8") if isinstance(text, str) else text)
+
+
+def get(path):
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def backups(path):
+    return sorted(glob.glob(path + ".truegauge-backup-*"))
+
+
+def prev_file():
+    return os.path.join(tg.HOME, "previous_statusline.json")
+
+
+OTHER = {"type": "command", "command": "python ~/mine/line.py", "padding": 2}
+
+# missing file: created, no backup (nothing to copy), previous = none
+d = fresh()
+sp = os.path.join(d, "cfg", "settings.json")
+code, out, err = cli("--install", "--settings", sp)
+s = json.loads(get(sp))
+check("install on a missing file: exit 0", code == 0, (code, err))
+check("install on a missing file: truegauge line written",
+      s["statusLine"]["type"] == "command" and s["statusLine"]["refreshInterval"] == 60
+      and "truegauge.py" in s["statusLine"]["command"], s)
+check("install on a missing file: command points at an existing script",
+      os.path.exists(s["statusLine"]["command"].split(" ")[-1].strip('"')), s["statusLine"]["command"])
+check("install on a missing file: no backup (nothing to copy)", backups(sp) == [], backups(sp))
+check("install on a missing file: saved 'there was none'",
+      json.loads(get(prev_file()))["entries"][os.path.abspath(sp)]["had_line"] is False)
+code, out, err = cli("--uninstall", "--settings", sp)
+check("uninstall after 'none': key removed, rest kept", code == 0 and json.loads(get(sp)) == {}, get(sp))
+check("uninstall: saved file removed after a successful write", not os.path.exists(prev_file()))
+
+# empty file (0 bytes and whitespace) is treated as {}
+for blank in (b"", b"  \n"):
+    d = fresh()
+    sp = os.path.join(d, "settings.json")
+    put(sp, blank)
+    code, out, err = cli("--install", "--settings", sp)
+    check("install on an empty file %r" % blank, code == 0 and "statusLine" in json.loads(get(sp)), (code, err))
+    check("install on an empty file: backup made", len(backups(sp)) == 1 and get(backups(sp)[0]) == blank)
+
+# other line + other keys: keys and their ORDER kept; install -> idempotent -> uninstall restores exactly
+d = fresh()
+sp = os.path.join(d, "settings.json")
+orig = {"model": "opus", "statusLine": OTHER, "env": {"A": "1", "B": "я"}, "permissions": {"allow": ["x", "y"]}}
+put(sp, json.dumps(orig, ensure_ascii=False, indent=4))
+before = get(sp)
+code, out, err = cli("--install", "--settings", sp)
+s = json.loads(get(sp))
+check("install with another line: exit 0", code == 0, (code, err))
+check("install: key order kept (statusLine stays in place)", list(s) == ["model", "statusLine", "env", "permissions"], list(s))
+check("install: other keys kept byte-for-value", all(s[k] == orig[k] for k in ("model", "env", "permissions")), s)
+check("install: backup holds the exact previous bytes", len(backups(sp)) == 1 and get(backups(sp)[0]) == before)
+check("install: the other line is saved",
+      json.loads(get(prev_file()))["entries"][os.path.abspath(sp)]["statusLine"] == OTHER)
+check("install output says how to undo", "--uninstall" in out, out)
+code, out2, _ = cli("--status", "--settings", sp)
+check("status: active + previous saved", code == 0 and "active status line: yes" in out2 and "line.py" in out2, out2)
+written = get(sp)
+code, out3, _ = cli("--install", "--settings", sp)
+check("install twice: exit 0, says so, file untouched", code == 0 and "already" in out3 and get(sp) == written, out3)
+check("install twice: no new backup", len(backups(sp)) == 1, backups(sp))
+check("install twice: saved previous not clobbered by a truegauge value",
+      json.loads(get(prev_file()))["entries"][os.path.abspath(sp)]["statusLine"] == OTHER)
+code, out4, err = cli("--uninstall", "--settings", sp)
+s = json.loads(get(sp))
+check("uninstall restores the exact previous line", code == 0 and s["statusLine"] == OTHER, s)
+check("uninstall: other keys and order kept", list(s) == ["model", "statusLine", "env", "permissions"]
+      and s["env"] == orig["env"] and s["permissions"] == orig["permissions"], list(s))
+check("uninstall: a backup of the truegauge-state file was made first", len(backups(sp)) == 2
+      and any("truegauge.py" in json.loads(get(x))["statusLine"].get("command", "") for x in backups(sp)), backups(sp))
+check("uninstall: saved file removed", not os.path.exists(prev_file()))
+code, out5, _ = cli("--uninstall", "--settings", sp)
+check("uninstall twice: nothing to do, file untouched", code == 0 and "not the status line" in out5
+      and json.loads(get(sp))["statusLine"] == OTHER)
+
+# uninstall while ANOTHER line is active (the user changed it later): no change, no backup
+d = fresh()
+sp = os.path.join(d, "settings.json")
+put(sp, json.dumps({"statusLine": OTHER}))
+cli("--install", "--settings", sp)
+put(sp, json.dumps({"statusLine": {"type": "command", "command": "python third.py"}}))
+before, nb = get(sp), len(backups(sp))
+code, out, _ = cli("--uninstall", "--settings", sp)
+check("uninstall on a foreign line: exit 0, file byte-identical", code == 0 and get(sp) == before, out)
+check("uninstall on a foreign line: no backup made", len(backups(sp)) == nb)
+check("uninstall on a foreign line: saved previous kept", os.path.exists(prev_file()))
+d2 = fresh()
+sp2 = os.path.join(d2, "settings.json")
+put(sp2, json.dumps({"model": "x"}))
+code, out, _ = cli("--uninstall", "--settings", sp2)
+check("uninstall with no statusLine at all: no change", code == 0 and json.loads(get(sp2)) == {"model": "x"}
+      and backups(sp2) == [])
+
+# unreadable / invalid: refuse, exit 2, file byte-identical, no backup, no saved file
+for label, content in (("invalid JSON", "{ not json"), ("a JSON list", "[1, 2]"), ("a JSON string", '"x"'),
+                       ("truncated", '{"statusLine": {"type": "comm')):
+    for flag in ("--install", "--uninstall", "--status"):
+        d = fresh()
+        sp = os.path.join(d, "settings.json")
+        put(sp, content)
+        code, out, err = cli(flag, "--settings", sp)
+        check("%s on %s: refused with exit 2" % (flag, label), code == 2 and "refused" in err, (code, err))
+        check("%s on %s: file byte-identical, no backup, nothing saved" % (flag, label),
+              get(sp) == content.encode() and backups(sp) == [] and not os.path.exists(prev_file()))
+d = fresh()
+code, out, err = cli("--install", "--settings", d)  # a directory, not a file
+check("install on a directory: refused, exit 2", code == 2, (code, err))
+code, out, err = cli("--install", "--settings")
+check("--settings without a path: refused, exit 2", code == 2, (code, err))
+d = fresh()
+sp = os.path.join(d, "settings.json")
+put(sp, json.dumps({"model": "x"}))
+put(prev_file(), "{ broken")
+code, out, err = cli("--install", "--settings", sp)
+check("damaged saved-previous file: install refused, settings untouched",
+      code == 2 and json.loads(get(sp)) == {"model": "x"} and backups(sp) == [], (code, err))
+
+# a backup exists for EVERY write, each under its own name
+d = fresh()
+sp = os.path.join(d, "settings.json")
+put(sp, json.dumps({"statusLine": OTHER}))
+cli("--install", "--settings", sp)
+cli("--uninstall", "--settings", sp)
+cli("--install", "--settings", sp)
+cli("--uninstall", "--settings", sp)
+check("backup before every write: 4 writes -> 4 distinct backups", len(set(backups(sp))) == 4, backups(sp))
+
+# CLAUDE_CONFIG_DIR is the default location; --settings=PATH form
+d = fresh()
+cfg = os.path.join(d, "claude_cfg")
+os.makedirs(cfg)
+put(os.path.join(cfg, "settings.json"), json.dumps({"model": "m"}))
+code, out, err = cli("--install", cfg=cfg)
+check("CLAUDE_CONFIG_DIR honoured by install", code == 0 and "statusLine" in json.loads(get(os.path.join(cfg, "settings.json"))), (out, err))
+code, out, _ = cli("--status", cfg=cfg)
+check("CLAUDE_CONFIG_DIR honoured by status", "active status line: yes" in out, out)
+code, out, err = cli("--uninstall", cfg=cfg)
+check("CLAUDE_CONFIG_DIR honoured by uninstall", code == 0 and json.loads(get(os.path.join(cfg, "settings.json"))) == {"model": "m"})
+sp = os.path.join(d, "eq.json")
+code, out, err = cli("--install", "--settings=" + sp)
+check("--settings=PATH form", code == 0 and os.path.exists(sp), (out, err))
+
+# two settings files, one state dir: each gets back ITS OWN previous line
+d = fresh()
+a, b = os.path.join(d, "a.json"), os.path.join(d, "b.json")
+put(a, json.dumps({"statusLine": {"type": "command", "command": "A"}}))
+put(b, json.dumps({"statusLine": {"type": "command", "command": "B"}}))
+cli("--install", "--settings", a)
+cli("--install", "--settings", b)
+cli("--uninstall", "--settings", a)
+cli("--uninstall", "--settings", b)
+check("two settings files: each restores its own line",
+      json.loads(get(a))["statusLine"]["command"] == "A" and json.loads(get(b))["statusLine"]["command"] == "B")
+
+# truegauge added by hand (no saved record): uninstall removes the key and says so
+d = fresh()
+sp = os.path.join(d, "settings.json")
+put(sp, json.dumps({"statusLine": {"type": "command", "command": "python C:/x/truegauge.py"}, "k": 1}))
+code, out, _ = cli("--uninstall", "--settings", sp)
+check("uninstall of a hand-made truegauge line: key removed, others kept, says no saved line",
+      code == 0 and json.loads(get(sp)) == {"k": 1} and "no saved previous" in out, out)
+
+# a path with a space is quoted in the command
+d = fresh()
+sp = os.path.join(d, "settings.json")
+cli("--install", "--settings", sp)
+cmd = json.loads(get(sp))["statusLine"]["command"]
+check("command has no backslashes (Git Bash would eat them)", "\\" not in cmd, cmd)
+check("_quote wraps a path with a space", tg._quote("C:/a b/x.py") == '"C:/a b/x.py"' and tg._quote("C:/ab/x.py") == "C:/ab/x.py")
+
+# the status-line mode (no args) still runs on a payload and does not touch settings
+import subprocess  # noqa: E402
+d = fresh()
+env = dict(os.environ, TRUEGAUGE_HOME=d, TRUEGAUGE_FABLE="0")
+r = subprocess.run([sys.executable, os.path.join(os.path.dirname(HERE), "truegauge.py")],
+                   input=json.dumps({"context_window": {"used_percentage": 55.2, "total_input_tokens": 548200}}).encode(),
+                   capture_output=True, env=env)
+check("no-arg mode unchanged: payload -> line, exit 0", r.returncode == 0 and r.stdout.decode("utf-8") == "T548K 55%", r)
+
+# the settings write fails during uninstall: the saved previous line must survive, the settings stay as they were
+d = fresh()
+sp = os.path.join(d, "settings.json")
+put(sp, json.dumps({"statusLine": OTHER}))
+cli("--install", "--settings", sp)
+before = get(sp)
+real_write = tg._write_atomic
+
+
+def failing_write(path, text):
+    if os.path.abspath(path) == os.path.abspath(sp):
+        raise OSError("disk full (simulated)")
+    return real_write(path, text)
+
+
+tg._write_atomic = failing_write
+try:
+    code, out, err = cli("--uninstall", "--settings", sp)
+finally:
+    tg._write_atomic = real_write
+check("failed settings write on uninstall: exit 2, settings unchanged", code == 2 and get(sp) == before, (code, err))
+check("failed settings write on uninstall: saved previous line kept", os.path.exists(prev_file())
+      and json.loads(get(prev_file()))["entries"][os.path.abspath(sp)]["statusLine"] == OTHER)
+code, out, err = cli("--uninstall", "--settings", sp)
+check("uninstall retried after the failure: previous line restored", code == 0 and json.loads(get(sp))["statusLine"] == OTHER)
+
 print("\n%d failed" % len(fails) if fails else "\nALL PASS")
 sys.exit(1 if fails else 0)

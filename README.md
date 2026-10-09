@@ -59,10 +59,33 @@ Only documented Claude Code surfaces. Your login token is never read or sent any
 
 ## Install
 
-Requires Python 3.8+ (standard library only) and Claude Code.
+Requires Python 3.8+ (standard library only) and Claude Code. Put `truegauge.py` anywhere, for example
+`~/.claude/truegauge.py`, then:
 
-1. Put `truegauge.py` anywhere, for example `~/.claude/truegauge.py`.
-2. Add to `~/.claude/settings.json`:
+```
+python ~/.claude/truegauge.py --install
+```
+
+This makes truegauge your status line in `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`;
+another file: `--settings PATH`). Your previous status line, if any, is saved first, and a copy of the settings
+file is made next to it (`settings.json.truegauge-backup-<time>`) before every change. Running it twice changes
+nothing. Open a new Claude Code session to see the line.
+
+## Turn off
+
+```
+python ~/.claude/truegauge.py --uninstall
+```
+
+puts your previous status line back, or removes the `statusLine` key if you had none. If the active line is not
+truegauge (you changed it since), nothing is touched. `python ~/.claude/truegauge.py --status` says whether
+truegauge is the active line and whether a previous one is saved. If the settings file is not valid JSON, all
+three commands refuse and leave it as it is. The file is rewritten as indented JSON with every key and its order
+kept; the backup copy has the exact old bytes.
+
+### By hand (alternative)
+
+Add to `~/.claude/settings.json`:
 
 ```json
 {
@@ -75,7 +98,8 @@ Requires Python 3.8+ (standard library only) and Claude Code.
 ```
 
 On Windows use the full path, for example `"python C:/Users/you/.claude/truegauge.py"`.
-`refreshInterval` keeps the time left moving while the session is quiet.
+`refreshInterval` keeps the time left moving while the session is quiet. `--uninstall` also removes a line added
+this way (there is no saved previous line, so the key is removed).
 
 ## Settings (environment variables)
 

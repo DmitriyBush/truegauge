@@ -61,6 +61,17 @@ MUTANTS = [
     ("window tokens not read from payload", "cti = _num(cw.get(\"total_input_tokens\"))", "cti = None"),
     ("ru letters lost", "\"T\": \"Т\"", "\"T\": \"T\""),
     ("fresh percentage rounds down", "return \"%d%%\" % _half_up(v[\"used_percentage\"])", "return \"%d%%\" % int(v[\"used_percentage\"])"),
+    ('install: no backup before the write', '    bak = _backup(path)\n    _write_atomic(path, json.dumps(d,', '    bak = None\n    _write_atomic(path, json.dumps(d,'),
+    ('install twice: saved previous overwritten by the truegauge line', '    if "statusLine" in d and _is_ours(d["statusLine"]):\n        print("truegauge is already', '    if False:\n        print("truegauge is already'),
+    ('uninstall touches a foreign line', '    if "statusLine" not in d or not _is_ours(d["statusLine"]):\n        print("truegauge is not the status line in', '    if "statusLine" not in d:\n        print("truegauge is not the status line in'),
+    ('invalid JSON treated as empty (would be overwritten)', '        raise Refuse("%s is not valid JSON (%s); nothing changed" % (path, e))', '        return {}'),
+    ('non-object JSON treated as empty', '        raise Refuse("%s is not a JSON object; nothing changed" % path)', '        return {}'),
+    ('uninstall always removes the key (previous not restored)', '    if isinstance(rec, dict) and rec.get("had_line"):', '    if False:'),
+    ('install drops the other keys', '    d["statusLine"] = {"type": "command", "command": _our_command(), "refreshInterval": 60}', '    d = {"statusLine": {"type": "command", "command": _our_command(), "refreshInterval": 60}}'),
+    ('CLAUDE_CONFIG_DIR ignored', '    cfg = os.environ.get("CLAUDE_CONFIG_DIR")', '    cfg = None'),
+    ('one saved previous for all settings files', '    entries[key] = {"had_line"', '    entries.clear()\n    entries[key] = {"had_line"'),
+    ('saved file removed before the settings write', '    bak = _write_settings(path, d)\n    entries.pop(key, None)\n    _prev_store(entries)  # only after the settings write succeeded', '    entries.pop(key, None)\n    _prev_store(entries)\n    bak = _write_settings(path, d)'),
+    ('damaged saved-previous file ignored', '        raise Refuse("saved previous line %s is unreadable (%s); nothing changed" % (_prev_file(), e))', '        return {}'),
 ]
 
 src = open(SRC, encoding="utf-8").read()
