@@ -821,5 +821,247 @@ check("failed settings write on uninstall: saved previous line kept", os.path.ex
 code, out, err = cli("--uninstall", "--settings", sp)
 check("uninstall retried after the failure: previous line restored", code == 0 and json.loads(get(sp))["statusLine"] == OTHER)
 
+# ======================================================================== 0.2: red group at the limit threshold
+import contextlib as _ctx  # noqa: E402
+import importlib.util  # noqa: E402
+import re  # noqa: E402
+import time  # noqa: E402
+
+COLOR_VARS = ("NO_COLOR", "TRUEGAUGE_RED_5H", "TRUEGAUGE_RED_7D", "TRUEGAUGE_RED_COLOR")
+RED = "\033[1;38;2;255;0;0m"
+RS = "\033[22;39m"
+SGR_RX = re.compile(r"\x1b\[[0-9;]*m")
+
+
+@_ctx.contextmanager
+def envset(**kw):
+    """Colour variables for one block: every colour variable is first UNSET, then the given ones are set."""
+    old = {k: os.environ.get(k) for k in COLOR_VARS}
+    for k in COLOR_VARS:
+        os.environ.pop(k, None)
+    for k, v in kw.items():
+        os.environ[k] = v
+    try:
+        yield
+    finally:
+        for k in COLOR_VARS:
+            os.environ.pop(k, None)
+        for k, v in old.items():
+            if v is not None:
+                os.environ[k] = v
+
+
+def g5(used, status="fresh", rin=7200):
+    return R({"five_hour": win(status, used, rin)})
+
+
+def g7(used, status="fresh", rin=3 * 86400):
+    return R({"seven_day": win(status, used, rin)})
+
+
+def red_of(text):
+    return RED + text + RS
+
+
+def shown(env):
+    """--show output with the colour variables `env`, on a state with a 97.6 % five-hour window and a 10 % week."""
+    fresh()
+    n = time.time()
+    tg.update(rl(five=(97.6, int(n) + 7200), seven=(10, int(n) + 3 * 86400)), n)
+    with envset(**env):
+        return cli("--show")[1]
+
+
+# ---- table of boundaries (defaults: 5 h = 98, week = 99)
+with envset():
+    check("red 5h fresh 97.49 -> 97%, not red", g5(97.49) == "2h 97%", g5(97.49))
+    check("red 5h fresh 97.5 -> 98%, red", g5(97.5) == red_of("2h 98%"), g5(97.5))
+    check("red 5h fresh 100 -> 100%, red", g5(100) == red_of("2h 100%"), g5(100))
+    check("red 5h old 97.6 -> >=97%, red (half_up 98)", g5(97.6, "stale_reading") == red_of("2h ≥97%"), g5(97.6, "stale_reading"))
+    check("red 5h old 97.49 -> >=97%, not red", g5(97.49, "stale_reading") == "2h ≥97%", g5(97.49, "stale_reading"))
+    check("red 5h old 100 -> >=100%, red", g5(100, "stale_reading") == red_of("2h ≥100%"), g5(100, "stale_reading"))
+    check("red week fresh 98.49 -> 98%, not red", g7(98.49) == "3d 98%", g7(98.49))
+    check("red week fresh 98.5 -> 99%, red", g7(98.5) == red_of("3d 99%"), g7(98.5))
+    check("red week old 98.5 -> >=98%, red", g7(98.5, "stale_reading") == red_of("3d ≥98%"), g7(98.5, "stale_reading"))
+    check("red: expired window -> no group at all", g5(99.9, "expired", -5) == "" and g7(99.9, "expired", -5) == "")
+    check("red: a reading far below the threshold is not red", g5(10) == "2h 10%" and g7(10) == "3d 10%")
+
+    # the invariant: the SAME reading, fresh then 901 s later old -- the colour does not change
+    fresh()
+    tg.update(rl(five=(97.6, NOW + 7200), seven=(98.5, NOW + 3 * 86400)), NOW)
+    a = R(tg.read_state(NOW + 10, 900))
+    b = R(tg.read_state(NOW + 10 + 901, 900))
+    check("invariant: fresh reading 97.6 / 98.5 is shown 98% / 99% and red",
+          a.startswith(RED + "1h 98%" + RS) and RED + "2d 99%" + RS in a, a)
+    check("invariant: the same reading 901 s old is shown >=97% / >=98% and STILL red",
+          b.startswith(RED + "1h ≥97%" + RS) and RED + "2d ≥98%" + RS in b, b)
+    check("invariant: ageing changes the text, not the red", a.count(RED) == b.count(RED) == 2 and a != b, (a, b))
+    flips = [x / 4.0 for x in range(0, 401) if ((RED in g5(x / 4.0)) != (RED in g5(x / 4.0, "stale_reading")))
+             or ((RED in g7(x / 4.0)) != (RED in g7(x / 4.0, "stale_reading")))]
+    check("invariant: for every reading 0..100 step 0.25 fresh and old have the same colour", flips == [], flips[:5])
+
+# ---- thresholds from the environment
+with envset(TRUEGAUGE_RED_5H="100"):
+    check("threshold 100: 99.49 -> 99%, not red", g5(99.49) == "2h 99%", g5(99.49))
+    check("threshold 100: 99.5 -> 100%, red", g5(99.5) == red_of("2h 100%"), g5(99.5))
+with envset(TRUEGAUGE_RED_5H="1"):
+    check("threshold 1: 0.49 -> 0%, not red", g5(0.49) == "2h 0%", g5(0.49))
+    check("threshold 1: 0.5 -> 1%, red", g5(0.5) == red_of("2h 1%"), g5(0.5))
+for off in ("off", "OFF", "Off", "0"):
+    with envset(TRUEGAUGE_RED_5H=off, TRUEGAUGE_RED_7D=off):
+        check("threshold %r: never red (100 %% fresh and old, both windows)" % off,
+              g5(100) == "2h 100%" and g5(100, "stale_reading") == "2h ≥100%" and g7(100) == "3d 100%"
+              and g7(100, "stale_reading") == "3d ≥100%", (g5(100), g7(100)))
+    out = shown(dict(TRUEGAUGE_RED_5H=off, TRUEGAUGE_RED_7D=off))
+    check("threshold %r: --show says off and does not call it a refusal" % off,
+          "5h=off week=off" in out and "REFUSED" not in out, out)
+with envset(TRUEGAUGE_RED_5H="50"):
+    check("5h threshold does not move the week", g7(60) == "3d 60%" and g5(50) == red_of("2h 50%"), (g5(50), g7(60)))
+with envset(TRUEGAUGE_RED_7D="50"):
+    check("week threshold does not move the 5h", g5(60) == "2h 60%" and g7(50) == red_of("3d 50%"), (g5(60), g7(50)))
+for var in ("TRUEGAUGE_RED_5H", "TRUEGAUGE_RED_7D"):
+    out = shown({var: ""})
+    with envset(**{var: ""}):
+        check("%s empty -> default, --show silent (empty cancels the variable)" % var,
+              g5(97.5) == red_of("2h 98%") and g5(97.49) == "2h 97%" and g7(98.5) == red_of("3d 99%")
+              and g7(98.49) == "3d 98%" and "REFUSED" not in out and "5h=98 week=99" in out, out)
+    for bad in ("101", "-1", "97.5", "abc", "1e2", "٩٨", "0x62", "00", "1000", "9" * 5000, "off now"):
+        out = shown({var: bad})
+        with envset(**{var: bad}):
+            ok = (g5(97.5) == red_of("2h 98%") and g5(97.49) == "2h 97%" and g7(98.5) == red_of("3d 99%")
+                  and g7(98.49) == "3d 98%")
+        check("%s=%r -> default used" % (var, bad[:12]), ok)
+        check("%s=%r -> --show names the refusal" % (var, bad[:12]), "REFUSED" in out and var in out, out)
+    with envset(**{var: " 98 "}):
+        ok = (g5(97.5) == red_of("2h 98%") and g5(97.49) == "2h 97%") if var.endswith("5H") else \
+            (g7(97.5) == red_of("3d 98%") and g7(97.49) == "3d 97%")
+    check("%s with spaces ' 98 ' -> accepted" % var, ok)
+    check("%s with spaces ' 98 ' -> --show silent" % var, "REFUSED" not in shown({var: " 98 "}))
+with envset(TRUEGAUGE_RED_5H="97.5", TRUEGAUGE_RED_7D="50"):
+    check("one refused threshold does not spoil the other", g7(50) == red_of("3d 50%"))
+
+# ---- colour
+for val, want in (("#FF0000", RED), ("#ff0000", RED), ("ansi", "\033[1;31m"), ("ANSI", "\033[1;31m"),
+                  ("#00ff7f", "\033[1;38;2;0;255;127m"), (" #ff0000 ", RED), ("", RED)):
+    with envset(TRUEGAUGE_RED_COLOR=val):
+        check("colour %r accepted -> %r" % (val, want), g5(100) == want + "2h 100%" + RS, g5(100))
+    check("colour %r: --show silent" % val, "REFUSED" not in shown({"TRUEGAUGE_RED_COLOR": val}))
+for val in ("#f00", "red", "#gg0000", "#ff00000", "ff0000", "31"):
+    with envset(TRUEGAUGE_RED_COLOR=val):
+        check("colour %r refused -> default" % val, g5(100) == red_of("2h 100%"), g5(100))
+    out = shown({"TRUEGAUGE_RED_COLOR": val})
+    check("colour %r refused -> --show names it" % val, "REFUSED" in out and "TRUEGAUGE_RED_COLOR" in out, out)
+with envset():
+    check("reset sequence is bold-off + default-foreground, not a full reset",
+          RS == "\033[22;39m" and g5(100).endswith("\033[22;39m") and "\033[0m" not in g5(100))
+
+# ---- NO_COLOR
+with envset(NO_COLOR="1"):
+    check("NO_COLOR=1 -> no escape at all", "\x1b" not in g5(100) and g5(100) == "2h 100%" and g7(100) == "3d 100%", g5(100))
+with envset(NO_COLOR="yes please"):
+    check("NO_COLOR=any non-empty text -> no colour", g5(100) == "2h 100%")
+with envset(NO_COLOR=" "):
+    check("NO_COLOR=' ' (non-empty) -> no colour", g5(100) == "2h 100%")
+with envset(NO_COLOR=""):
+    check("NO_COLOR='' (empty) -> colour is there", g5(100) == red_of("2h 100%"), g5(100))
+    check("NO_COLOR='' -> --show does not claim NO_COLOR", "NO_COLOR is set" not in shown({"NO_COLOR": ""}))
+check("NO_COLOR=1 -> --show says so", "NO_COLOR is set" in shown({"NO_COLOR": "1"}))
+
+# ---- both groups red, the rest never
+with envset():
+    full = R({"five_hour": win("fresh", 98.2, 7200), "seven_day": win("fresh", 99.9, 3 * 86400),
+              "fable": win("fresh", 100, None)}, {"new": 2600000, "complete": True}, 100, "en", 548200)
+    want = red_of("2h 98%") + " " + red_of("3d 100%") + " F100% T548K 100% Σ2.6M"
+    check("both groups red, a plain space between, Fable / T / % / Σ without colour", full == want, full)
+    check("red wraps exactly the two groups (2 starts, 2 resets)", full.count(RED) == 2 and full.count(RS) == 2, full)
+    check("Fable alone at 100 % is not red", R({"fable": win("fresh", 100, None)}) == "F100%")
+    check("context fill alone at 100 % is not red", R({}, None, 100, "en", 548200) == "T548K 100%")
+    check("ru words with a red group", R({"five_hour": win("fresh", 99, 7200)}, {"new": 2600000, "complete": True}, 55, "ru", 548200)
+          == red_of("2h 99%") + " Т548К 55% Σ2.6М")
+
+# ---- --show: thresholds line, the shell note, per-window verdict
+out = shown({})
+check("--show: thresholds line", "colour: thresholds 5h=98 week=99, colour ESC[1;38;2;255;0;0m" in out, out)
+check("--show: says the values are those of this shell, settings.json env seen only by the status line",
+      "values of THIS shell" in out and "settings.json" in out and "status line itself" in out, out)
+check("--show: per-window verdict (5h past, week not)", "five_hour: past the red threshold: yes" in out
+      and "seven_day: past the red threshold: no" in out, out)
+check("--show: with refusals the line lists them", "REFUSED (default used): TRUEGAUGE_RED_5H='abc'" in shown({"TRUEGAUGE_RED_5H": "abc"}))
+check("version is 0.2.0", tg.__version__ == "0.2.0")
+
+# ---- equivalence with v0.1.0 (kept byte for byte as tests/ref_v0_1_0.py)
+_spec = importlib.util.spec_from_file_location("ref_v0_1_0", os.path.join(HERE, "ref_v0_1_0.py"))
+ref = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(ref)
+check("reference module is v0.1.0", ref.__version__ == "0.1.0", ref.__version__)
+FIVES = [None, win("fresh", 0, 18000), win("fresh", 38.5, 14400), win("fresh", 97.49, 7200), win("fresh", 97.5, 7200),
+         win("fresh", 97.6, 3000), win("fresh", 98, 7200), win("fresh", 100, 60), win("stale_reading", 97.6, 7200),
+         win("stale_reading", 100, 7200), win("stale_reading", 38.9, 14400), win("expired", 99, -5)]
+SEVENS = [None, win("fresh", 54, 5 * 86400), win("fresh", 98.49, 3 * 86400), win("fresh", 98.5, 3 * 86400),
+          win("fresh", 99, 3600), win("fresh", 100, 86400), win("stale_reading", 98.5, 86400 * 2),
+          win("stale_reading", 99.9, 7200), win("expired", 80, -5)]
+FABLES = [None, win("fresh", 4, None), win("fresh", 100, None), win("stale_reading", 99, 86400), win("expired", 50, -5),
+          {"status": "absent"}]
+TOKS = [None, {"new": 2600000, "complete": True}, {"new": 2650000, "complete": False}]
+CTXS = [(None, None), (55.2, 548200), (100, 999999), (0, 0), (98, None)]
+states = []
+for i5, f5 in enumerate(FIVES):
+    for i7, f7 in enumerate(SEVENS):
+        for ifb, fb in enumerate(FABLES):
+            k = i5 * 31 + i7 * 7 + ifb
+            st = {n: v for n, v in (("five_hour", f5), ("seven_day", f7), ("fable", fb)) if v is not None}
+            states.append((st, TOKS[k % 3], CTXS[k % 5], "ru" if k % 4 == 0 else "en"))
+states.append(({}, None, (None, None), "en"))  # empty input
+
+
+def both(s):
+    return (tg.render(s[0], s[1], s[2][0], s[3], s[2][1]), ref.render(s[0], s[1], s[2][0], s[3], s[2][1]))
+
+
+check("equivalence set has at least 30 states and includes the empty one", len(states) >= 30 and states[-1][0] == {}, len(states))
+with envset(NO_COLOR="1"):
+    diff = [s for s in states if both(s)[0] != both(s)[1]]
+check("equivalence: NO_COLOR=1 -> 0.2 output == v0.1.0 output byte for byte on all %d states" % len(states), diff == [], diff[:1])
+with envset():
+    outs = [both(s) for s in states]
+check("equivalence: without NO_COLOR, SGR stripped -> 0.2 output == v0.1.0 output on all states",
+      all(SGR_RX.sub("", a) == b for a, b in outs), [o for o in outs if SGR_RX.sub("", o[0]) != o[1]][:1])
+check("equivalence is not vacuous: v0.1.0 never emits an escape, 0.2 does on many states",
+      not any("\x1b" in b for a, b in outs) and sum("\x1b" in a for a, b in outs) >= 100, sum("\x1b" in a for a, b in outs))
+
+# end to end: the real scripts on a few payloads, NO_COLOR=1 byte for byte, and stripped without NO_COLOR
+_now = int(time.time())
+PAYLOADS = [
+    {"rate_limits": {"five_hour": {"used_percentage": 97.6, "resets_at": _now + 12000},
+                     "seven_day": {"used_percentage": 99.5, "resets_at": _now + 3 * 86400}},
+     "context_window": {"used_percentage": 55.2, "total_input_tokens": 548200}},
+    {"rate_limits": {"five_hour": {"used_percentage": 100, "resets_at": _now + 12000}}},
+    {"rate_limits": {"five_hour": {"used_percentage": 12, "resets_at": _now + 12000},
+                     "seven_day": {"used_percentage": 98.49, "resets_at": _now + 3 * 86400}}, "context_window": {}},
+    {},
+]
+
+
+def run_script(script, payload, extra):
+    d = tempfile.mkdtemp(dir=ROOT)
+    guard_path(d)
+    env = {k: v for k, v in os.environ.items() if k not in COLOR_VARS}
+    env.update(TRUEGAUGE_HOME=d, TRUEGAUGE_FABLE="0", **extra)
+    r = subprocess.run([sys.executable, script], input=json.dumps(payload).encode(), capture_output=True, env=env)
+    return r.returncode, r.stdout
+
+
+ok_nc = ok_st = True
+for pl in PAYLOADS:
+    c1, o1 = run_script(os.path.join(HERE, "ref_v0_1_0.py"), pl, {})
+    c2, o2 = run_script(os.path.join(os.path.dirname(HERE), "truegauge.py"), pl, {"NO_COLOR": "1"})
+    c3, o3 = run_script(os.path.join(os.path.dirname(HERE), "truegauge.py"), pl, {})
+    ok_nc = ok_nc and c1 == c2 == c3 == 0 and o1 == o2
+    ok_st = ok_st and SGR_RX.sub("", o3.decode("utf-8")).encode("utf-8") == o1
+check("end to end (real scripts, %d payloads): NO_COLOR=1 output == v0.1.0 byte for byte" % len(PAYLOADS), ok_nc)
+check("end to end: without NO_COLOR the stripped output == v0.1.0", ok_st)
+_c, _o = run_script(os.path.join(os.path.dirname(HERE), "truegauge.py"), PAYLOADS[0], {})
+check("end to end: payload 97.6 / 99.5 really prints two red groups", _o.decode("utf-8").count(RED) == 2, _o)
+
 print("\n%d failed" % len(fails) if fails else "\nALL PASS")
 sys.exit(1 if fails else 0)
