@@ -3,16 +3,24 @@
 A status line for Claude Code that never shows an old number as a current one.
 
 ```
-5h: 1h21m left 78% | week: 5d 7h left 82% | F left 96% | session 529k tok | context 31%
+4h 38% 3d 54% F4% T548K 55% Σ2.6M
 ```
 
-| Part | Meaning |
+A number and its unit are written together; groups are separated by one space. Percentages are **used**,
+not left. A group whose data is unknown is left out, never shown as 0.
+
+| Group | Meaning |
 |---|---|
-| `5h: 1h21m left 78%` | time until the 5-hour window resets, and how much of it is still left |
-| `week: 5d 7h left 82%` | the same for the weekly window (all models) |
-| `F left 96%` | the separate weekly **Fable** allowance, still left |
-| `session 529k tok` | tokens spent in this session: input + cache writes + output, main conversation **and its subagents** (cache reads are counted apart, see `--show`) |
-| `context 31%` | how full the context window is |
+| `4h 38%` | 5-hour window: time until it resets (hours; under 1 h minutes, `45m`), and the share used |
+| `3d 54%` | the same for the weekly window (all models): days; under 1 day hours (`23h`); under 1 h minutes |
+| `F4%` | the separate weekly **Fable** allowance, share used |
+| `T548K` | tokens in the context window right now (`context_window.total_input_tokens`: input including cache reads and writes) |
+| `55%` | how full the context window is |
+| `Σ2.6M` | tokens spent in this session: input + cache writes + output, main conversation **and its subagents**, each API message once (cache reads are counted apart, see `--show`). `Σ≥2.6M` = a lower bound (a large transcript is still being read, or a line was unreadable) |
+
+Times are rounded down. Numbers: `812`, `548K`, `2.6M` (decimal point; with `TRUEGAUGE_LANG=ru` the letters
+`T K M` are Cyrillic). A percentage with `≥` (`≥38%`) is a stale reading: it can only have grown, so the number
+is a lower bound (rounded down). A window that has reset shows a full window at zero: `5h 0%`, `7d 0%`, `F0%`.
 
 ## Why another status line
 
@@ -26,9 +34,9 @@ truegauge follows three rules:
 1. **A replayed reading never wins.** Several sessions share one account. Per window, the reading with
    the later reset time and the higher usage wins; an older, lower reading from an idle session is ignored.
 2. **An unchanged reading ages.** When no plan number has changed for 15 minutes, truegauge shows
-   `<=78%` ("at most 78% left") instead of `78%`. Usage inside a window only grows, so the true remainder
-   can only be lower.
-3. **A window that has reset says `reset`**, not the number from before the reset.
+   `≥38%` ("used at least 38%") instead of `38%`. Usage inside a window only grows, so the true figure
+   can only be higher.
+3. **A window that has reset shows a new window at 0%** (`5h 0%`), not the number from before the reset.
 
 Any failure leaves the line partial or empty, never wrong, and is written to `~/.truegauge/errors.log`
 or shown by `truegauge.py --show`.
@@ -72,10 +80,10 @@ On Windows use the full path, for example `"python C:/Users/you/.claude/truegaug
 
 | Variable | Default | |
 |---|---|---|
-| `TRUEGAUGE_LANG` | `en` | `ru` for Russian labels |
+| `TRUEGAUGE_LANG` | `en` | `ru` for Cyrillic unit letters (`Т К М`) |
 | `TRUEGAUGE_FABLE` | `1` | `0` turns off the background `/usage` read |
 | `TRUEGAUGE_PROBE_S` | `600` | seconds between `/usage` reads (minimum 120) |
-| `TRUEGAUGE_MAX_AGE_S` | `900` | after this many seconds without a change a reading is shown as `<=` |
+| `TRUEGAUGE_MAX_AGE_S` | `900` | after this many seconds without a change a reading is shown as `≥` |
 | `TRUEGAUGE_HOME` | `~/.truegauge` | where the state lives |
 
 ## Check it
@@ -109,8 +117,8 @@ python tests/mutants.py          # breaks the code on purpose; every break must 
   1 second the update goes ahead, and a lost update is repaired by the next reading.
 - A Fable reading is dropped (not shown as a bound) when it is old and its reset time is unknown,
   and it ends when a newer weekly window starts.
-- On a very large transcript the first count is finished over several refreshes and shown as `>=`;
-  a line that cannot be read also turns the count into `>=` (a lower bound).
+- On a very large transcript the first count is finished over several refreshes and shown as `Σ≥`;
+  a line that cannot be read also turns the count into `Σ≥` (a lower bound).
 - One state directory per Claude account: two logins sharing `~/.truegauge` would mix their readings --
   give each its own `TRUEGAUGE_HOME`.
 - A transcript replaced by a different file of greater length is not detected (transcripts are append-only).

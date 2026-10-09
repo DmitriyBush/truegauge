@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """truegauge -- a status line for Claude Code that never shows an old number as a current one.
 
-Shows: time left in the 5-hour and weekly plan windows with the percentage still left, the weekly
-Fable window (separate allowance, letter F), tokens spent in this session (main + subagents), and how
-full the context window is.
+Shows one short line, e.g. `4h 38% 3d 54% F4% T548K 55% Σ2.6M` (number and unit written together):
+  4h 38%   5-hour window: time left (hours, then minutes under 1 h) and the share USED
+  3d 54%   weekly window: time left (days, then hours, then minutes) and the share used
+  F4%      the weekly Fable window (separate allowance), share used
+  T548K    tokens in the context window now
+  55%      how full the context window is
+  Σ2.6M    tokens spent in this session (main conversation + subagents); `Σ≥2.6M` = a lower bound
+A group whose data is unknown is left out, never shown as 0. `T K M` are Cyrillic with TRUEGAUGE_LANG=ru.
 
 Sources (all documented Claude Code surfaces, nothing scraped, no token of yours leaves Claude Code):
   * status-line stdin JSON: rate_limits.five_hour / seven_day {used_percentage, resets_at},
-    context_window.used_percentage, transcript_path, session_id.
+    context_window.used_percentage and total_input_tokens, transcript_path, session_id.
   * transcript JSONL (transcript_path + <session>/subagents/*.jsonl): per-message `usage`.
   * Fable: the status line does not carry it. truegauge runs `claude -p /usage` in the background at
     most once per TRUEGAUGE_PROBE_S seconds (default 600) and reads the line
@@ -17,8 +22,8 @@ Honesty rules (the reason this tool exists):
   * A session left idle re-sends its LAST reading. Per window the reading with the larger
     (resets_at, used_percentage) wins; an equal reset with a lower percentage is a replay and is ignored.
   * Use inside a window only grows. A reading that did not change for TRUEGAUGE_MAX_AGE_S (900 s) is shown
-    as "<=N%" (at most N% left), never as a point value.
-  * A window whose reset time has passed shows "reset", not the old number.
+    as "≥N%" (used at least N%, rounded down), never as a point value.
+  * A window whose reset time has passed shows a full window at 0% ("5h 0%", "7d 0%", "F0%"), not the old number.
   * Any failure leaves the status line empty or partial, never wrong; it is recorded in errors.log.
 
 Modes:
@@ -482,10 +487,31 @@ def _sess_file(session_id):
     return os.path.join(SESS_DIR, safe + ".json")
 
 
-def _tally_file(path, rec):
+def _file_key(path):
+    """One file, one key: slash direction, drive-letter case and `.` segments must not make two records of it."""
+    return os.path.normcase(os.path.abspath(path))
+
+
+def _merge_spellings(rec):
+    """A record written under several keys that name one file keeps the key that read furthest (it has read
+    everything the others read; summing them is the double count). -> (record, changed)."""
+    out, changed = {}, False
+    for k, st in rec.items():
+        nk = _file_key(k)
+        changed = changed or nk != k
+        prev = out.get(nk)
+        if prev is not None:
+            changed = True
+            if not (isinstance(st, dict) and isinstance(prev, dict) and st.get("offset", 0) > prev.get("offset", 0)):
+                continue
+        out[nk] = st
+    return out, changed
+
+
+def _tally_file(path, rec, key=None):
     """Read new complete lines of one JSONL. Each API message id keeps the MAX of each usage field over all its
     lines (Claude Code writes one message over several lines, not always adjacent). -> True if anything changed."""
-    st = rec.setdefault(path, {"offset": 0, "ids": {}, "noid": 0})
+    st = rec.setdefault(key or _file_key(path), {"offset": 0, "ids": {}, "noid": 0})
     try:
         size = os.path.getsize(path)
     except OSError:
@@ -549,16 +575,18 @@ def session_tokens(transcript_path, session_id):
     rec, problem = _read(sf)
     if problem not in (None, "missing"):
         rec = {}
-    files = [transcript_path] + sorted(glob.glob(os.path.join(glob.escape(transcript_path[:-6]), "subagents", "*.jsonl")))
-    changed = False
-    for p in files:
+    rec, changed = _merge_spellings(rec)
+    files = {}
+    for p in [transcript_path] + sorted(glob.glob(os.path.join(glob.escape(transcript_path[:-6]), "subagents", "*.jsonl"))):
+        files.setdefault(_file_key(p), p)
+    for k, p in files.items():
         if os.path.exists(p):
-            changed = _tally_file(p, rec) or changed
+            changed = _tally_file(p, rec, k) or changed
     if changed:
         _save(rec, sf)
         if problem == "missing":  # once per new session
             _prune_sessions(time.time())
-    if not any(os.path.exists(p) for p in files) and not rec:
+    if not any(os.path.exists(p) for p in files.values()) and not rec:
         return None  # a wrong transcript_path is not "0 tokens"
     new = cr = bad = 0
     complete = True
@@ -577,61 +605,75 @@ def session_tokens(transcript_path, session_id):
 # ---------------------------------------------------------------- rendering
 
 WORDS = {
-    "en": {"5h": "5h", "7d": "week", "left": "left", "reset": "reset", "sess": "session", "tok": "tok",
-           "ctx": "context", "d": "d", "h": "h", "m": "m", "k": "k", "M": "M"},
-    "ru": {"5h": "5ч", "7d": "неделя", "left": "ост.", "reset": "сброшено", "sess": "сессия", "tok": "ток.",
-           "ctx": "контекст", "d": "д", "h": "ч", "m": "м", "k": " тыс.", "M": " млн"},
+    "en": {"d": "d", "h": "h", "m": "m", "T": "T", "K": "K", "M": "M"},
+    "ru": {"d": "d", "h": "h", "m": "m", "T": "Т", "K": "К", "M": "М"},
 }
+FULL_WINDOW = {"five_hour": "5h", "seven_day": "7d"}  # what an expired window shows as its time left
+GE = "≥"
+SIGMA = "Σ"
+
+
+def _half_up(x):
+    return int(math.floor(x + 0.5))
 
 
 def fmt_left(sec, w):
+    """Time left, one unit, rounded DOWN: >= 1 day -> days, >= 1 h -> hours, else minutes (min 0m)."""
     sec = max(0, int(sec))
-    d, rem = divmod(sec, 86400)
-    h, rem = divmod(rem, 3600)
-    m = rem // 60
-    if d:
-        return "%d%s %d%s" % (d, w["d"], h, w["h"])
-    if h:
-        return "%d%s%02d%s" % (h, w["h"], m, w["m"])
-    return "%d%s" % (m, w["m"])
+    if sec >= 86400:
+        return "%d%s" % (sec // 86400, w["d"])
+    if sec >= 3600:
+        return "%d%s" % (sec // 3600, w["h"])
+    return "%d%s" % (sec // 60, w["m"])
 
 
 def fmt_tokens(n, w):
-    if n >= 1_000_000:
-        return ("%.1f" % (n / 1e6)).rstrip("0").rstrip(".") + w["M"]
-    if n >= 1000:
-        return "%d%s" % (round(n / 1000), w["k"])
-    return str(n)
+    """Unit glued to the number: <1000 -> 812; <999500 -> 548K; else 2.6M (half up, `.` separator)."""
+    n = max(0, int(n))
+    if n < 1000:
+        return str(n)
+    if n < 999_500:
+        return "%d%s" % ((n + 500) // 1000, w["K"])
+    tenths = (n + 50_000) // 100_000
+    return "%d.%d%s" % (tenths // 10, tenths % 10, w["M"])
 
 
-def _pct(v):
+def _used(v):
+    """Used share: fresh -> the rounded number; a stale reading can only have grown, so its old value is a
+    LOWER bound: `>=` and the number rounded DOWN (never above the reading). Expired -> 0 (nothing used yet)."""
     if v.get("status") == "fresh":
-        return "%d%%" % round(v["remaining_percentage"])
-    return "<=%d%%" % math.ceil(v["remaining_at_most"])  # an upper bound is rounded UP, never below itself
+        return "%d%%" % _half_up(v["used_percentage"])
+    if v.get("status") == "stale_reading":
+        return "%s%d%%" % (GE, math.floor(v["used_percentage"]))
+    return "0%"
 
 
-def render(st, tokens, ctx_pct, lang="en"):
+def render(st, tokens, ctx_pct, lang="en", ctx_tokens=None):
+    """`4h 38% 3d 54% F4% T548K 55% Σ2.6M`: 5-hour window, week, Fable, tokens in the window now, context fill,
+    session total. A group whose data is unknown is left out, never shown as 0."""
     w = WORDS.get(lang, WORDS["en"])
     parts = []
-    for key, tag in (("five_hour", "5h"), ("seven_day", "7d")):
+    for key in ("five_hour", "seven_day"):
         v = st.get(key)
         if not v:
             continue
         if v["status"] == "expired":
-            parts.append("%s: %s" % (w[tag], w["reset"]))
+            parts.append("%s 0%%" % FULL_WINDOW[key])
         else:
-            parts.append("%s: %s %s %s" % (w[tag], fmt_left(v["resets_in_s"], w), w["left"], _pct(v)))
+            parts.append("%s %s" % (fmt_left(v["resets_in_s"], w), _used(v)))
     fb = st.get("fable")
     if fb and fb.get("status") in ("fresh", "stale_reading"):
-        parts.append("F %s %s" % (w["left"], _pct(fb)))
+        parts.append("F" + _used(fb))
     elif fb and fb.get("status") == "expired":
-        parts.append("F %s" % w["reset"])
-    if tokens is not None:
-        parts.append("%s %s%s %s" % (w["sess"], "" if tokens.get("complete", True) else ">=",
-                                       fmt_tokens(tokens["new"], w), w["tok"]))
+        parts.append("F0%")
+    ct = _num(ctx_tokens)
+    if ct is not None:
+        parts.append(w["T"] + fmt_tokens(ct, w))
     if ctx_pct is not None:
-        parts.append("%s %d%%" % (w["ctx"], round(ctx_pct)))
-    return " | ".join(parts)
+        parts.append("%d%%" % _half_up(ctx_pct))
+    if tokens is not None:
+        parts.append("%s%s%s" % (SIGMA, "" if tokens.get("complete", True) else GE, fmt_tokens(tokens["new"], w)))
+    return " ".join(parts)
 
 
 def statusline(payload, now=None):
@@ -649,7 +691,8 @@ def statusline(payload, now=None):
         _record_error("tokens: %s: %s" % (type(e).__name__, e))
     cw = payload.get("context_window")
     ctx = _num(cw.get("used_percentage")) if isinstance(cw, dict) else None
-    return render(st, tokens, ctx, os.environ.get("TRUEGAUGE_LANG", "en"))
+    cti = _num(cw.get("total_input_tokens")) if isinstance(cw, dict) else None
+    return render(st, tokens, ctx, os.environ.get("TRUEGAUGE_LANG", "en"), cti)
 
 
 def show():
