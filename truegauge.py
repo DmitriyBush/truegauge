@@ -18,6 +18,15 @@ Sources (all documented Claude Code surfaces, nothing scraped, no token of yours
     most once per TRUEGAUGE_PROBE_S seconds (default 600) and reads the line
     "Current week (Fable): N% used". Off with TRUEGAUGE_FABLE=0.
 
+Colors (0.2): a window group (time + percent) turns red when the reading has reached a threshold:
+  half_up(used%) >= TRUEGAUGE_RED_5H (default 98) for the 5-hour window, TRUEGAUGE_RED_7D (default 99) for the week.
+  The test is on the RAW reading, so it is the same for a fresh `98%` and an old `≥97%` (an old reading only
+  grew): ageing never changes the colour. Fable, tokens and context fill are never coloured; an expired window
+  has no group. Threshold: an integer 1..100, or `off` / `0` = never; empty or unset = default; anything else
+  = default, and `--show` names the refusal. TRUEGAUGE_RED_COLOR: `#rrggbb` (default #ff0000) or `ansi`
+  (bold red of your terminal theme). The group is wrapped in `ESC[1;..m ... ESC[22;39m`; the space between groups
+  is not. NO_COLOR set to anything non-empty: no colour at all (output identical to 0.1).
+
 Honesty rules (the reason this tool exists):
   * A session left idle re-sends its LAST reading. Per window the reading with the larger
     (resets_at, used_percentage) wins; an equal reset with a lower percentage is a replay and is ignored.
@@ -36,7 +45,8 @@ Modes:
                   (all three take [--settings PATH]; default ~/.claude/settings.json or
                   $CLAUDE_CONFIG_DIR/settings.json. Every write is preceded by a backup copy.)
 Config (environment): TRUEGAUGE_HOME (state dir, default ~/.truegauge), TRUEGAUGE_LANG (en|ru),
-  TRUEGAUGE_FABLE (1|0), TRUEGAUGE_PROBE_S, TRUEGAUGE_MAX_AGE_S.
+  TRUEGAUGE_FABLE (1|0), TRUEGAUGE_PROBE_S, TRUEGAUGE_MAX_AGE_S, TRUEGAUGE_RED_5H, TRUEGAUGE_RED_7D,
+  TRUEGAUGE_RED_COLOR, NO_COLOR.
 Stdlib only. License: Apache-2.0.
 """
 import glob
@@ -50,7 +60,7 @@ import sys
 import time
 from datetime import datetime
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 HOME = os.environ.get("TRUEGAUGE_HOME") or os.path.join(os.path.expanduser("~"), ".truegauge")
 STATE = os.path.join(HOME, "state.json")
@@ -671,18 +681,82 @@ def fmt_tokens(n, w, down=False):
     return "%d.%d%s" % (tenths // 10, tenths % 10, w["M"])
 
 
+def _pct_int(x, floor=False):
+    """The ONE place that turns a share into the whole percent: half up (the number shown for a fresh reading, and
+    the number the colour test uses) or rounded down (the lower bound shown for an old reading)."""
+    return math.floor(x) if floor else _half_up(x)
+
+
 def _used(v):
     """Used share: fresh -> the rounded number; a stale reading can only have grown, so its old value is a
     LOWER bound: `>=` and the number rounded DOWN (never above the reading). Expired -> 0 (nothing used yet)."""
-    if v.get("status") == "fresh":
-        return "%d%%" % _half_up(v["used_percentage"])
-    return "%s%d%%" % (GE, math.floor(v["used_percentage"]))  # stale_reading (render passes nothing else)
+    stale = v.get("status") != "fresh"  # render passes nothing but fresh and stale_reading
+    return "%s%d%%" % (GE if stale else "", _pct_int(v["used_percentage"], floor=stale))
+
+
+# ---------------------------------------------------------------- colour (0.2)
+
+RED_VARS = {"five_hour": ("TRUEGAUGE_RED_5H", 98), "seven_day": ("TRUEGAUGE_RED_7D", 99)}
+RED_RESET = "\033[22;39m"  # bold off + default foreground only: any other style the terminal had stays
+RED_ANSI = "\033[1;31m"
+RED_DEFAULT_RGB = "#ff0000"
+
+
+def _threshold(raw, default):
+    """-> (threshold | None for off, refusal | None). Unset or empty = default, silently (an empty value is how Claude
+    Code cancels a variable); spaces at the edges are cut."""
+    s = (raw or "").strip()
+    if not s:
+        return default, None
+    if s.lower() == "off" or s == "0":
+        return None, None
+    if re.fullmatch(r"[0-9]{1,3}", s) and 1 <= int(s) <= 100:
+        return int(s), None
+    return default, "%r (an integer 1..100, or off / 0)" % raw
+
+
+def _rgb(hexcolor):
+    return "\033[1;38;2;%d;%d;%dm" % tuple(int(hexcolor[i:i + 2], 16) for i in (1, 3, 5))
+
+
+def _sgr(raw):
+    """-> (escape sequence, refusal | None) for TRUEGAUGE_RED_COLOR."""
+    s = (raw or "").strip()
+    if not s:
+        return _rgb(RED_DEFAULT_RGB), None
+    if s.lower() == "ansi":
+        return RED_ANSI, None
+    if re.fullmatch(r"#[0-9a-fA-F]{6}", s):
+        return _rgb(s), None
+    return _rgb(RED_DEFAULT_RGB), "%r (#rrggbb or ansi)" % raw
+
+
+def color_config(environ=None):
+    """The colour settings as THIS process sees them: {'no_color': bool, 'th': {window: n | None}, 'sgr': str,
+    'refused': {variable: why}}."""
+    env = os.environ if environ is None else environ
+    refused, th = {}, {}
+    for w, (var, default) in RED_VARS.items():
+        th[w], bad = _threshold(env.get(var), default)
+        if bad:
+            refused[var] = bad
+    sgr, bad = _sgr(env.get("TRUEGAUGE_RED_COLOR"))
+    if bad:
+        refused["TRUEGAUGE_RED_COLOR"] = bad
+    return {"no_color": bool(env.get("NO_COLOR")), "th": th, "sgr": sgr, "refused": refused}
+
+
+def _reached(v, threshold):
+    """The window's RAW reading has reached the threshold. Same answer for a fresh and an old reading of the same
+    numbers: ageing does not change the colour."""
+    return threshold is not None and _pct_int(v["used_percentage"]) >= threshold
 
 
 def render(st, tokens, ctx_pct, lang="en", ctx_tokens=None):
     """`4h 38% 3d 54% F4% T548K 55% Σ2.6M`: 5-hour window, week, Fable, tokens in the window now, context fill,
     session total. A group whose data is unknown is left out, never shown as 0."""
     w = WORDS.get(lang, WORDS["en"])
+    cc = color_config()
     parts = []
     for key in ("five_hour", "seven_day"):
         v = st.get(key)
@@ -690,7 +764,10 @@ def render(st, tokens, ctx_pct, lang="en", ctx_tokens=None):
         # the Claude web app or another session counts too), so "0%" would be a guess shown as a number
         if not v or v["status"] not in ("fresh", "stale_reading"):
             continue
-        parts.append("%s %s" % (fmt_left(v["resets_in_s"], w, days_only=(key == "seven_day")), _used(v)))
+        group = "%s %s" % (fmt_left(v["resets_in_s"], w, days_only=(key == "seven_day")), _used(v))
+        if not cc["no_color"] and _reached(v, cc["th"][key]):
+            group = cc["sgr"] + group + RED_RESET
+        parts.append(group)
     fb = st.get("fable")
     if fb and fb.get("status") in ("fresh", "stale_reading"):  # expired Fable: left out until the probe reads again
         parts.append("F" + _used(fb))
@@ -724,6 +801,10 @@ def statusline(payload, now=None):
     return render(st, tokens, ctx, os.environ.get("TRUEGAUGE_LANG", "en"), cti)
 
 
+def _th_name(n):
+    return "off" if n is None else str(n)
+
+
 def show():
     st = read_state()
     t = st["_tap"]
@@ -733,10 +814,19 @@ def show():
     for k in ("unresolved_error", "last_rejected", "recovered_from_corrupt_at", "probe_error"):
         if t.get(k):
             print("tap: %s: %s" % (k, t[k]))
+    cc = color_config()
+    print("colour: thresholds 5h=%s week=%s, colour %s%s%s"
+          % (_th_name(cc["th"]["five_hour"]), _th_name(cc["th"]["seven_day"]), cc["sgr"].replace("\033", "ESC"),
+             "; NO_COLOR is set: no colour" if cc["no_color"] else "",
+             "; REFUSED (default used): %s" % "; ".join("%s=%s" % kv for kv in sorted(cc["refused"].items()))
+             if cc["refused"] else ""))
+    print("colour: values of THIS shell; an `env` block in settings.json is seen only by the status line itself")
     for key in WINDOWS + ("fable",):
         v = st.get(key)
         if not v:
             continue
+        if key in RED_VARS and v.get("status") in ("fresh", "stale_reading"):
+            print("%s: past the red threshold: %s" % (key, "yes" if _reached(v, cc["th"][key]) else "no"))
         if v.get("status") == "fresh":
             print("%s: used %.1f%%, remaining %.1f%%, resets in %s s, fresh"
                   % (key, v["used_percentage"], v["remaining_percentage"], v["resets_in_s"]))
