@@ -8,9 +8,38 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
+
+# The REAL user's places, computed (never opened) BEFORE the environment is replaced.
+REAL_HOME = os.path.expanduser("~")
+REAL_PROTECTED = [os.path.join(REAL_HOME, ".claude"), os.path.join(REAL_HOME, ".truegauge")]
+ROOT = tempfile.mkdtemp(prefix="tg_test_")
+SANDBOX = os.path.join(ROOT, "sandbox_home")
+os.makedirs(os.path.join(SANDBOX, ".claude"))
+# The whole run lives in temporary places: whatever default truegauge computes lands inside ROOT.
+for _k, _v in (("HOME", SANDBOX), ("USERPROFILE", SANDBOX), ("CLAUDE_CONFIG_DIR", os.path.join(SANDBOX, ".claude")),
+               ("TRUEGAUGE_HOME", os.path.join(SANDBOX, ".truegauge"))):
+    os.environ[_k] = _v
 import truegauge as tg  # noqa: E402
 
-ROOT = tempfile.mkdtemp(prefix="tg_test_")
+
+def _norm(p):
+    return os.path.normcase(os.path.realpath(os.path.abspath(p)))
+
+
+def _inside(p, d):
+    p, d = _norm(p), _norm(d)
+    return p == d or p.startswith(d + os.sep)
+
+
+def guard_path(p):
+    """Fuse: a path a call is about to read or write must not be the real user's, and must lie inside ROOT.
+    Raises BEFORE anything is written."""
+    for real in REAL_PROTECTED:
+        if _inside(p, real):
+            raise RuntimeError("TEST FUSE: %s is inside the REAL user directory %s; refusing before any write" % (p, real))
+    if not _inside(p, ROOT):
+        raise RuntimeError("TEST FUSE: %s is outside the temporary test root %s; refusing before any write" % (p, ROOT))
+
 fails = []
 NOW = 1_800_000_000
 
@@ -468,16 +497,18 @@ import io  # noqa: E402
 def cli(*args, cfg=None):
     """Run main() in-process; returns (exit code, stdout, stderr). cfg sets CLAUDE_CONFIG_DIR for the call."""
     out, err = io.StringIO(), io.StringIO()
-    old = os.environ.pop("CLAUDE_CONFIG_DIR", None)
-    if cfg:
-        os.environ["CLAUDE_CONFIG_DIR"] = cfg
+    old = os.environ.get("CLAUDE_CONFIG_DIR")
+    os.environ["CLAUDE_CONFIG_DIR"] = cfg or os.path.join(SANDBOX, ".claude")
+    guard_path(tg.HOME)
+    try:
+        guard_path(tg._settings_path(list(args)))  # where truegauge WILL write, asked before it writes
+    except tg.Refuse:
+        pass  # e.g. "--settings" without a path: main() refuses it itself
     try:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = tg.main(list(args))
     finally:
-        os.environ.pop("CLAUDE_CONFIG_DIR", None)
-        if old is not None:
-            os.environ["CLAUDE_CONFIG_DIR"] = old
+        os.environ["CLAUDE_CONFIG_DIR"] = old
     return code, out.getvalue(), err.getvalue()
 
 
@@ -642,13 +673,110 @@ cli("--uninstall", "--settings", b)
 check("two settings files: each restores its own line",
       json.loads(get(a))["statusLine"]["command"] == "A" and json.loads(get(b))["statusLine"]["command"] == "B")
 
-# truegauge added by hand (no saved record): uninstall removes the key and says so
+# truegauge added by hand / record lost (N3): uninstall REFUSES (exit 2), names the newest backup and --force;
+# with --force the key is removed
 d = fresh()
 sp = os.path.join(d, "settings.json")
-put(sp, json.dumps({"statusLine": {"type": "command", "command": "python C:/x/truegauge.py"}, "k": 1}))
-code, out, _ = cli("--uninstall", "--settings", sp)
-check("uninstall of a hand-made truegauge line: key removed, others kept, says no saved line",
-      code == 0 and json.loads(get(sp)) == {"k": 1} and "no saved previous" in out, out)
+hand = json.dumps({"statusLine": {"type": "command", "command": "python C:/x/truegauge.py"}, "k": 1})
+put(sp, hand)
+put(sp + ".truegauge-backup-20200101T000000Z", "{}")
+put(sp + ".truegauge-backup-20200202T000000Z", "{}")
+os.utime(sp + ".truegauge-backup-20200101T000000Z", (1_000_000_000, 1_000_000_000))
+os.utime(sp + ".truegauge-backup-20200202T000000Z", (1_100_000_000, 1_100_000_000))
+code, out, err = cli("--uninstall", "--settings", sp)
+check("uninstall without a saved record: refused, exit 2", code == 2 and "refused" in err, (code, err))
+check("uninstall without a saved record: file byte-identical, no new backup",
+      get(sp) == hand.encode() and len(backups(sp)) == 2)
+check("uninstall without a saved record: message names the NEWEST backup and --force",
+      "20200202T000000Z" in err and "20200101T000000Z" not in err and "--force" in err, err)
+code, out, err = cli("--uninstall", "--force", "--settings", sp)
+check("uninstall --force without a record: key removed, others kept, says no saved line",
+      code == 0 and json.loads(get(sp)) == {"k": 1} and "no saved previous" in out, (out, err))
+d = fresh()
+sp = os.path.join(d, "settings.json")
+put(sp, hand)
+code, out, err = cli("--uninstall", "--settings", sp)
+check("uninstall without a record and without any backup: refused, says none found",
+      code == 2 and "none found" in err and "--force" in err, err)
+# the record lost the way it really gets lost: another TRUEGAUGE_HOME
+d = fresh()
+sp = os.path.join(d, "settings.json")
+put(sp, json.dumps({"statusLine": OTHER}))
+cli("--install", "--settings", sp)
+fresh()  # state dir replaced: the record is not found
+code, out, err = cli("--uninstall", "--settings", sp)
+check("uninstall after the state dir was lost: refused, line kept",
+      code == 2 and "truegauge.py" in json.loads(get(sp))["statusLine"]["command"], (code, err))
+
+# UTF-8 only on read (N4): a cp1251 byte in a value is refused, nothing written; a BOM is accepted
+for flag in ("--install", "--uninstall", "--status"):
+    d = fresh()
+    sp = os.path.join(d, "settings.json")
+    bad = b'{"model": "\xcf\xf0\xe8\xe2\xe5\xf2", "statusLine": {"type": "command", "command": "truegauge.py"}}'
+    put(sp, bad)
+    code, out, err = cli(flag, "--settings", sp)
+    check("%s on a cp1251 file: refused, says UTF-8" % flag, code == 2 and "UTF-8" in err, (code, err))
+    check("%s on a cp1251 file: bytes intact, no backup, nothing saved" % flag,
+          get(sp) == bad and backups(sp) == [] and not os.path.exists(prev_file()))
+d = fresh()
+sp = os.path.join(d, "settings.json")
+PRIVET = "\u041f\u0440\u0438\u0432\u0435\u0442"
+put(sp, b"\xef\xbb\xbf" + json.dumps({"model": PRIVET}, ensure_ascii=False).encode("utf-8"))
+code, out, err = cli("--install", "--settings", sp)
+check("BOM + UTF-8 Cyrillic read fine, value kept", code == 0 and json.loads(get(sp))["model"] == PRIVET, (code, err))
+
+# the fuse itself (N1): it must refuse the real user's settings and anything outside the test root, and it must
+# let a temporary path through. Only path STRINGS are used; the real files are not opened.
+fused = []
+for label, p in (("real settings.json", os.path.join(REAL_HOME, ".claude", "settings.json")),
+                 ("real .claude dir", os.path.join(REAL_HOME, ".claude")),
+                 ("real .truegauge", os.path.join(REAL_HOME, ".truegauge", "previous_statusline.json")),
+                 ("outside ROOT", os.path.join(os.path.dirname(ROOT), "tg_elsewhere", "settings.json"))):
+    try:
+        guard_path(p)
+        fused.append(label)
+    except RuntimeError as e:
+        check("fuse refuses %s with an explicit message" % label, "TEST FUSE" in str(e), str(e))
+check("fuse refuses every non-temporary path", fused == [], fused)
+try:
+    guard_path(os.path.join(ROOT, "x", "settings.json"))
+    check("fuse lets a temporary path through", True)
+except RuntimeError as e:
+    check("fuse lets a temporary path through", False, str(e))
+# the fuse is WIRED into cli(): a call aimed outside ROOT dies before truegauge runs. Only --status on paths that
+# do not exist is used, so a missing fuse still cannot write anything.
+for label, setter in (("settings path", None), ("state dir", "home")):
+    d = fresh()
+    elsewhere = tempfile.mkdtemp(prefix="tg_outside_")
+    home_kept = tg.HOME
+    sp = os.path.join(d, "settings.json")
+    if setter == "home":
+        tg.HOME = os.path.join(elsewhere, "state")
+    else:
+        sp = os.path.join(elsewhere, "settings.json")
+    try:
+        cli("--status", "--settings", sp)
+        wired = False
+    except RuntimeError as e:
+        wired = "TEST FUSE" in str(e)
+    finally:
+        tg.HOME = home_kept
+    check("fuse is wired into cli(): a %s outside the test root stops the call" % label, wired)
+# a path inside a (fake) 'real' user directory is refused by the real-directory branch, with its own message
+fake_real = tempfile.mkdtemp(prefix="tg_fakereal_")
+REAL_PROTECTED.append(fake_real)
+try:
+    guard_path(os.path.join(fake_real, "settings.json"))
+    check("fuse: a protected directory is refused (message names the REAL directory)", False)
+except RuntimeError as e:
+    check("fuse: a protected directory is refused (message names the REAL directory)", "REAL user directory" in str(e), str(e))
+finally:
+    REAL_PROTECTED.pop()
+
+# defaults land in the sandbox: a call WITHOUT --settings resolves inside ROOT, not in the real home
+check("default settings path (no --settings) lies in the sandbox, not in the real home",
+      _inside(tg._settings_path([]), SANDBOX) and not _inside(tg._settings_path([]), os.path.join(REAL_HOME, ".claude")),
+      tg._settings_path([]))
 
 # a path with a space is quoted in the command
 d = fresh()

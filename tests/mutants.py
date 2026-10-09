@@ -72,19 +72,33 @@ MUTANTS = [
     ('one saved previous for all settings files', '    entries[key] = {"had_line"', '    entries.clear()\n    entries[key] = {"had_line"'),
     ('saved file removed before the settings write', '    bak = _write_settings(path, d)\n    entries.pop(key, None)\n    _prev_store(entries)  # only after the settings write succeeded', '    entries.pop(key, None)\n    _prev_store(entries)\n    bak = _write_settings(path, d)'),
     ('damaged saved-previous file ignored', '        raise Refuse("saved previous line %s is unreadable (%s); nothing changed" % (_prev_file(), e))', '        return {}'),
+    # ---- review round 2: strict UTF-8, refusal without a saved record, the test fuse
+    ('settings read with errors="replace"', 'text = raw.decode("utf-8-sig")  # strict', 'text = raw.decode("utf-8-sig", "replace")  # strict'),
+    ('uninstall without a record removes the key silently', '    if rec is None and not force:', '    if False:'),
+    ('--force always on', 'force="--force" in argv', 'force=True'),
+    ('--force ignored', 'force="--force" in argv', 'force=False'),
+    ('refusal names the oldest backup, not the newest', 'return max(found, key=lambda p: (os.path.getmtime(p), p))', 'return min(found, key=lambda p: (os.path.getmtime(p), p))'),
+    # mutants of the TEST FILE: the fuse must not be removable without the suite going red
+    ('FUSE: real-directory branch removed', '    for real in REAL_PROTECTED:', '    for real in []:', "test"),
+    ('FUSE: outside-root branch removed', '    if not _inside(p, ROOT):', '    if False:', "test"),
+    ('FUSE: not called on the settings path', '        guard_path(tg._settings_path(list(args)))', '        pass', "test"),
+    ('FUSE: not called on the state dir', '    guard_path(tg.HOME)', '    pass', "test"),
 ]
 
 src = open(SRC, encoding="utf-8").read()
 slipped = 0
-for name, old, new in MUTANTS:
-    if src.count(old) != 1:
-        print("BLIND  %s (pattern found %d times -- mutant not applied)" % (name, src.count(old)))
+TEST_SRC = open(os.path.join(HERE, "test_truegauge.py"), encoding="utf-8").read()
+for name, old, new, *target in MUTANTS:
+    on_test = bool(target)
+    base = TEST_SRC if on_test else src
+    if base.count(old) != 1:
+        print("BLIND  %s (pattern found %d times -- mutant not applied)" % (name, base.count(old)))
         slipped += 1
         continue
     d = tempfile.mkdtemp(prefix="tg_mut_")
     os.makedirs(os.path.join(d, "tests"))
-    open(os.path.join(d, "truegauge.py"), "w", encoding="utf-8").write(src.replace(old, new))
-    shutil.copy(os.path.join(HERE, "test_truegauge.py"), os.path.join(d, "tests"))
+    open(os.path.join(d, "truegauge.py"), "w", encoding="utf-8").write(src if on_test else src.replace(old, new))
+    open(os.path.join(d, "tests", "test_truegauge.py"), "w", encoding="utf-8").write(TEST_SRC.replace(old, new) if on_test else TEST_SRC)
     r = subprocess.run([sys.executable, os.path.join(d, "tests", "test_truegauge.py")], capture_output=True, text=True)
     ok = r.returncode != 0
     slipped += 0 if ok else 1

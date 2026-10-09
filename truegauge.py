@@ -793,7 +793,10 @@ def _read_settings(path):
         return {}
     except OSError as e:
         raise Refuse("cannot read %s: %s" % (path, e))
-    text = raw.decode("utf-8-sig", "replace")
+    try:
+        text = raw.decode("utf-8-sig")  # strict: a byte that is not UTF-8 must not be turned into U+FFFD and written back
+    except UnicodeDecodeError as e:
+        raise Refuse("%s is not valid UTF-8 (%s); nothing changed" % (path, e))
     if not text.strip():
         return {}
     try:
@@ -911,7 +914,12 @@ def install(path):
     return 0
 
 
-def uninstall(path):
+def _latest_backup(path):
+    found = glob.glob(glob.escape(path) + ".truegauge-backup-*")
+    return max(found, key=lambda p: (os.path.getmtime(p), p)) if found else None
+
+
+def uninstall(path, force=False):
     d = _read_settings(path)
     key = os.path.abspath(path)
     if "statusLine" not in d or not _is_ours(d["statusLine"]):
@@ -919,6 +927,12 @@ def uninstall(path):
         return 0
     entries = _prev_load()
     rec = entries.get(key)
+    if rec is None and not force:
+        bak = _latest_backup(path)
+        raise Refuse("truegauge is the status line in %s but there is no saved previous line for it (the saved "
+                     "file %s may be lost or from another TRUEGAUGE_HOME); removing the key would drop the line "
+                     "silently. Newest backup of the settings file: %s. To remove the key anyway: add --force"
+                     % (path, _prev_file(), bak or "none found next to the file"))
     if isinstance(rec, dict) and rec.get("had_line"):
         d["statusLine"] = rec.get("statusLine")
         what = "previous line restored: %s" % json.dumps(rec.get("statusLine"), ensure_ascii=False)
@@ -956,8 +970,11 @@ def status(path):
 def settings_mode(argv):
     try:
         path = _settings_path(argv)
-        fn = install if "--install" in argv else uninstall if "--uninstall" in argv else status
-        return fn(path)
+        if "--install" in argv:
+            return install(path)
+        if "--uninstall" in argv:
+            return uninstall(path, force="--force" in argv)
+        return status(path)
     except Refuse as e:
         print("truegauge: refused: %s" % e, file=sys.stderr)
         return 2

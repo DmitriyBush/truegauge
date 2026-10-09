@@ -98,8 +98,9 @@ Add to `~/.claude/settings.json`:
 ```
 
 On Windows use the full path, for example `"python C:/Users/you/.claude/truegauge.py"`.
-`refreshInterval` keeps the time left moving while the session is quiet. `--uninstall` also removes a line added
-this way (there is no saved previous line, so the key is removed).
+`refreshInterval` keeps the time left moving while the session is quiet. `--uninstall` refuses on a line added
+this way (there is no saved previous line, so removing the key would drop it silently); it names the newest backup
+and `--uninstall --force` removes the key.
 
 ## Settings (environment variables)
 
