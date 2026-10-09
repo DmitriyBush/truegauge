@@ -667,9 +667,10 @@ def render(st, tokens, ctx_pct, lang="en", ctx_tokens=None):
     elif fb and fb.get("status") == "expired":
         parts.append("F0%")
     ct = _num(ctx_tokens)
-    if ct is not None:
+    no_reading = ct is not None and ct <= 0  # Claude Code sends 0 before the first reply and after /compact: no reading, not an empty window
+    if ct is not None and not no_reading:
         parts.append(w["T"] + fmt_tokens(ct, w))
-    if ctx_pct is not None:
+    if ctx_pct is not None and not (no_reading and ctx_pct <= 0):
         parts.append("%d%%" % _half_up(ctx_pct))
     if tokens is not None:
         parts.append("%s%s%s" % (SIGMA, "" if tokens.get("complete", True) else GE, fmt_tokens(tokens["new"], w)))

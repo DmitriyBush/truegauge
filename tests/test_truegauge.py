@@ -396,17 +396,20 @@ for status in ("unknown", "absent"):
     check("Fable %s -> group omitted, not 0" % status, got == "", got)
 check("no data at all -> empty line (no 0 groups)", R({}) == "" and R({}, None, None, "en", None) == "")
 # tokens in the window now (Т) and session total (Σ), boundaries
-for n, want in ((0, "T0"), (812, "T812"), (999, "T999"), (1000, "T1K"), (1499, "T1K"), (1500, "T2K"),
+for n, want in ((0, ""), (1, "T1"), (812, "T812"), (999, "T999"), (1000, "T1K"), (1499, "T1K"), (1500, "T2K"),
                 (548_200, "T548K"), (999_499, "T999K"), (999_500, "T1.0M"), (1_000_000, "T1.0M"),
                 (2_640_000, "T2.6M"), (2_650_000, "T2.7M"), (13_800_000, "T13.8M")):
     got = R({}, None, None, "en", n)
     check("window tokens %d -> %s" % (n, want), got == want, got)
+    sw = "Σ" + (want[1:] if n else "0")  # a session total of 0 is a real count (transcript read, nothing spent yet)
     got = R({}, {"new": n, "complete": True})
-    check("session total %d -> Σ%s" % (n, want[1:]), got == "Σ" + want[1:], got)
+    check("session total %d -> %s" % (n, sw), got == sw, got)
 check("ru letters", R({}, {"new": 2_640_000, "complete": True}, None, "ru", 548_200) == "Т548К Σ2.6М",
       R({}, {"new": 2_640_000, "complete": True}, None, "ru", 548_200))
 check("incomplete total -> Σ≥", R({}, {"new": 2_640_000, "complete": False}) == "Σ≥2.6M",
       R({}, {"new": 2_640_000, "complete": False}))
+check("zero window tokens (no reading yet / after compact) -> no T and no 0% group", R({}, None, 0.0, cti=0) == "", R({}, None, 0.0, cti=0))
+check("zero window tokens but a real fill -> fill kept", R({}, None, 12.0, cti=0) == "12%", R({}, None, 12.0, cti=0))
 check("missing total_input_tokens -> no T group", R({}, None, 55.0) == "55%", R({}, None, 55.0))
 check("missing used_percentage -> no % group", R({}, None, None, "en", 548_200) == "T548K")
 check("the sample line", R({"five_hour": win("fresh", 38, 4 * 3600 + 5), "seven_day": win("fresh", 54, 3 * 86400 + 9),
