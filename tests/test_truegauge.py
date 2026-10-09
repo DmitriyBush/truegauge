@@ -19,6 +19,10 @@ os.makedirs(os.path.join(SANDBOX, ".claude"))
 for _k, _v in (("HOME", SANDBOX), ("USERPROFILE", SANDBOX), ("CLAUDE_CONFIG_DIR", os.path.join(SANDBOX, ".claude")),
                ("TRUEGAUGE_HOME", os.path.join(SANDBOX, ".truegauge"))):
     os.environ[_k] = _v
+# Colour settings of the person running the tests must not reach the checks (a TRUEGAUGE_RED_5H=50 in their shell
+# would turn every 0.1 check at >= 50% into a false FAIL); the colour checks set what they need themselves.
+for _k in ("TRUEGAUGE_RED_5H", "TRUEGAUGE_RED_7D", "TRUEGAUGE_RED_COLOR", "NO_COLOR"):
+    os.environ.pop(_k, None)
 import truegauge as tg  # noqa: E402
 
 
