@@ -12,7 +12,7 @@ not left. A group whose data is unknown is left out, never shown as 0.
 | Group | Meaning |
 |---|---|
 | `4h 38%` | 5-hour window: time until it resets (hours; under 1 h minutes, `45m`), and the share used |
-| `3d 54%` | the same for the weekly window (all models): days; under 1 day hours (`23h`); under 1 h minutes |
+| `3d 54%` | the same for the weekly window (all models): always whole days, `0d` in the last day (so it never looks like the 5-hour group) |
 | `F4%` | the separate weekly **Fable** allowance, share used |
 | `T548K` | tokens in the context window right now (`context_window.total_input_tokens`: input including cache reads and writes) |
 | `55%` | how full the context window is |
@@ -20,7 +20,7 @@ not left. A group whose data is unknown is left out, never shown as 0.
 
 Times are rounded down. Numbers: `812`, `548K`, `2.6M` (decimal point; with `TRUEGAUGE_LANG=ru` the letters
 `T K M` are Cyrillic). A percentage with `≥` (`≥38%`) is a stale reading: it can only have grown, so the number
-is a lower bound (rounded down). A window that has reset shows a full window at zero: `5h 0%`, `7d 0%`, `F0%`.
+is a lower bound (rounded down). A window that has reset is left out until a new reading arrives.
 
 ## Why another status line
 
@@ -36,7 +36,8 @@ truegauge follows three rules:
 2. **An unchanged reading ages.** When no plan number has changed for 15 minutes, truegauge shows
    `≥38%` ("used at least 38%") instead of `38%`. Usage inside a window only grows, so the true figure
    can only be higher.
-3. **A window that has reset shows a new window at 0%** (`5h 0%`), not the number from before the reset.
+3. **A window that has reset is left out** until a new reading arrives, not shown with the number from before the
+   reset and not as a guessed `0%` (usage from the Claude web app or another session counts against the same limit).
 
 Any failure leaves the line partial or empty, never wrong, and is written to `~/.truegauge/errors.log`
 or shown by `truegauge.py --show`.

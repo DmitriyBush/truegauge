@@ -23,7 +23,7 @@ Honesty rules (the reason this tool exists):
     (resets_at, used_percentage) wins; an equal reset with a lower percentage is a replay and is ignored.
   * Use inside a window only grows. A reading that did not change for TRUEGAUGE_MAX_AGE_S (900 s) is shown
     as "≥N%" (used at least N%, rounded down), never as a point value.
-  * A window whose reset time has passed shows a full window at 0% ("5h 0%", "7d 0%", "F0%"), not the old number.
+  * A window whose reset time has passed is left out until a new reading -- not the old number, not a guessed 0%.
   * Any failure leaves the status line empty or partial, never wrong; it is recorded in errors.log.
 
 Modes:
@@ -608,7 +608,6 @@ WORDS = {
     "en": {"d": "d", "h": "h", "m": "m", "T": "T", "K": "K", "M": "M"},
     "ru": {"d": "d", "h": "h", "m": "m", "T": "Т", "K": "К", "M": "М"},
 }
-FULL_WINDOW = {"five_hour": "5h", "seven_day": "7d"}  # what an expired window shows as its time left
 GE = "≥"
 SIGMA = "Σ"
 
@@ -617,21 +616,28 @@ def _half_up(x):
     return int(math.floor(x + 0.5))
 
 
-def fmt_left(sec, w):
-    """Time left, one unit, rounded DOWN: >= 1 day -> days, >= 1 h -> hours, else minutes (min 0m)."""
+def fmt_left(sec, w, days_only=False):
+    """Time left, one unit, rounded DOWN: >= 1 day -> days, >= 1 h -> hours, else minutes (min 0m).
+    days_only (the week): always days, `0d` in the last day -- so the week group can never look like the 5-hour one."""
     sec = max(0, int(sec))
-    if sec >= 86400:
+    if days_only or sec >= 86400:
         return "%d%s" % (sec // 86400, w["d"])
     if sec >= 3600:
         return "%d%s" % (sec // 3600, w["h"])
     return "%d%s" % (sec // 60, w["m"])
 
 
-def fmt_tokens(n, w):
-    """Unit glued to the number: <1000 -> 812; <999500 -> 548K; else 2.6M (half up, `.` separator)."""
+def fmt_tokens(n, w, down=False):
+    """Unit glued to the number: <1000 -> 812; <999500 -> 548K; else 2.6M (half up, `.` separator).
+    down=True for a lower bound: rounded DOWN, never above the count (`Σ≥2.6M` for 2.65M)."""
     n = max(0, int(n))
     if n < 1000:
         return str(n)
+    if down:
+        if n < 1_000_000:
+            return "%d%s" % (n // 1000, w["K"])
+        tenths = n // 100_000
+        return "%d.%d%s" % (tenths // 10, tenths % 10, w["M"])
     if n < 999_500:
         return "%d%s" % ((n + 500) // 1000, w["K"])
     tenths = (n + 50_000) // 100_000
@@ -643,9 +649,7 @@ def _used(v):
     LOWER bound: `>=` and the number rounded DOWN (never above the reading). Expired -> 0 (nothing used yet)."""
     if v.get("status") == "fresh":
         return "%d%%" % _half_up(v["used_percentage"])
-    if v.get("status") == "stale_reading":
-        return "%s%d%%" % (GE, math.floor(v["used_percentage"]))
-    return "0%"
+    return "%s%d%%" % (GE, math.floor(v["used_percentage"]))  # stale_reading (render passes nothing else)
 
 
 def render(st, tokens, ctx_pct, lang="en", ctx_tokens=None):
@@ -655,25 +659,22 @@ def render(st, tokens, ctx_pct, lang="en", ctx_tokens=None):
     parts = []
     for key in ("five_hour", "seven_day"):
         v = st.get(key)
-        if not v:
+        # an expired window is left out: after the reset nothing is known until a new reading (usage from
+        # the Claude web app or another session counts too), so "0%" would be a guess shown as a number
+        if not v or v["status"] not in ("fresh", "stale_reading"):
             continue
-        if v["status"] == "expired":
-            parts.append("%s 0%%" % FULL_WINDOW[key])
-        else:
-            parts.append("%s %s" % (fmt_left(v["resets_in_s"], w), _used(v)))
+        parts.append("%s %s" % (fmt_left(v["resets_in_s"], w, days_only=(key == "seven_day")), _used(v)))
     fb = st.get("fable")
-    if fb and fb.get("status") in ("fresh", "stale_reading"):
+    if fb and fb.get("status") in ("fresh", "stale_reading"):  # expired Fable: left out until the probe reads again
         parts.append("F" + _used(fb))
-    elif fb and fb.get("status") == "expired":
-        parts.append("F0%")
     ct = _num(ctx_tokens)
     no_reading = ct is not None and ct <= 0  # Claude Code sends 0 before the first reply and after /compact: no reading, not an empty window
     if ct is not None and not no_reading:
         parts.append(w["T"] + fmt_tokens(ct, w))
-    if ctx_pct is not None and not (no_reading and ctx_pct <= 0):
+    if ctx_pct is not None and not no_reading:  # a fill with 0 tokens is not from a real reading either
         parts.append("%d%%" % _half_up(ctx_pct))
     if tokens is not None:
-        parts.append("%s%s%s" % (SIGMA, "" if tokens.get("complete", True) else GE, fmt_tokens(tokens["new"], w)))
+        parts.append("%s%s%s" % (SIGMA, "" if tokens.get("complete", True) else GE, fmt_tokens(tokens["new"], w, down=not tokens.get("complete", True))))
     return " ".join(parts)
 
 

@@ -76,7 +76,7 @@ tg.update(rl(five=(70, NOW + 100)), NOW)
 check("one second before reset -> open", tg.read_state(NOW + 99)["five_hour"]["status"] == "fresh")
 s = tg.read_state(NOW + 100)["five_hour"]
 check("at reset -> expired, no remainder", s["status"] == "expired" and s["remaining_percentage"] is None, s)
-check("expired renders a full window at 0%, not the old number", tg.render({"five_hour": s}, None, None) == "5h 0%",
+check("expired window is left out, not the old number and not a guessed 0%", tg.render({"five_hour": s}, None, None) == "",
       tg.render({"five_hour": s}, None, None))
 
 # ---- bad input never stored
@@ -191,7 +191,7 @@ tg.probe_usage(NOW, runner=lambda: TXT.replace("4% used", "96% used"))
 tg.update(rl(seven=(1, NOW + 300 + 7 * 86400)), NOW + 360)   # new week started; Fable reading is 6 min old
 s = tg.read_state(NOW + 361)["fable"]
 check("new week -> old Fable reading expired, not fresh", s["status"] == "expired", s)
-check("expired Fable renders F0%", tg.render({"fable": s}, None, None) == "F0%")
+check("expired Fable is left out", tg.render({"fable": s}, None, None) == "")
 fresh()
 tg.update(rl(seven=(50, NOW + 3 * 86400)), NOW)      # week known at probe time ends in 3 days
 tg.probe_usage(NOW, runner=lambda: TXT.replace("4% used", "96% used"))
@@ -371,9 +371,8 @@ def R(st, tokens=None, ctx=None, lang="en", cti=None):
 for rin, want in ((18000, "5h"), (14399, "3h"), (3600, "1h"), (3599, "59m"), (2700, "45m"), (59, "0m"), (0, "0m")):
     got = R({"five_hour": win("fresh", 38, rin)})
     check("5h window %d s left -> %s 38%%" % (rin, want), got == want + " 38%", got)
-# time left, week: >= 1 day -> floor days, < 1 day -> hours, < 1 h -> minutes
-for rin, want in ((5 * 86400 + 7 * 3600, "5d"), (86400, "1d"), (86399, "23h"), (86399 - 59 * 60, "23h"),
-                  (3600, "1h"), (3599, "59m"), (60, "1m")):
+# time left, week: always floor days (0d in the last day), so it never looks like the 5-hour group
+for rin, want in ((5 * 86400 + 7 * 3600, "5d"), (86400, "1d"), (86399, "0d"), (3600, "0d"), (60, "0d"), (0, "0d")):
     got = R({"seven_day": win("fresh", 54, rin)})
     check("week %d s left -> %s 54%%" % (rin, want), got == want + " 54%", got)
 # fresh / stale / expired for each window
@@ -382,7 +381,9 @@ check("stale 5h: floor with >=, never above the reading", got == "4h ≥38%", go
 got = R({"five_hour": win("fresh", 38.5, 14400)})
 check("fresh rounds half up", got == "4h 39%", got)
 got = R({"five_hour": win("expired", 90, -5), "seven_day": win("expired", 80, -5)})
-check("expired windows: full window, 0% used", got == "5h 0% 7d 0%", got)
+check("expired windows are left out", got == "", got)
+got = R({"five_hour": win("expired", 90, -5), "seven_day": win("fresh", 54, 3600)})
+check("week in its last day with the 5h window absent cannot pass for the 5h group", got == "0d 54%", got)
 got = R({"seven_day": win("stale_reading", 54.7, 3 * 86400)})
 check("stale week", got == "3d ≥54%", got)
 got = R({"fable": win("fresh", 4)})
@@ -390,7 +391,7 @@ check("Fable fresh", got == "F4%", got)
 got = R({"fable": win("stale_reading", 4.9)})
 check("Fable stale", got == "F≥4%", got)
 got = R({"fable": {"status": "expired", "last_seen_used_percentage": 96, "remaining_percentage": None}})
-check("Fable expired -> F0%", got == "F0%", got)
+check("Fable expired -> left out", got == "", got)
 for status in ("unknown", "absent"):
     got = R({"fable": {"status": status}})
     check("Fable %s -> group omitted, not 0" % status, got == "", got)
@@ -409,7 +410,10 @@ check("ru letters", R({}, {"new": 2_640_000, "complete": True}, None, "ru", 548_
 check("incomplete total -> Σ≥", R({}, {"new": 2_640_000, "complete": False}) == "Σ≥2.6M",
       R({}, {"new": 2_640_000, "complete": False}))
 check("zero window tokens (no reading yet / after compact) -> no T and no 0% group", R({}, None, 0.0, cti=0) == "", R({}, None, 0.0, cti=0))
-check("zero window tokens but a real fill -> fill kept", R({}, None, 12.0, cti=0) == "12%", R({}, None, 12.0, cti=0))
+check("zero window tokens with a fill -> both left out (no real reading)", R({}, None, 12.0, cti=0) == "", R({}, None, 12.0, cti=0))
+for n, want in ((2_650_000, "Σ≥2.6M"), (2_699_999, "Σ≥2.6M"), (999_999, "Σ≥999K"), (1_500, "Σ≥1K"), (812, "Σ≥812")):
+    got = R({}, {"new": n, "complete": False})
+    check("incomplete total %d is a lower bound, rounded down -> %s" % (n, want), got == want, got)
 check("missing total_input_tokens -> no T group", R({}, None, 55.0) == "55%", R({}, None, 55.0))
 check("missing used_percentage -> no % group", R({}, None, None, "en", 548_200) == "T548K")
 check("the sample line", R({"five_hour": win("fresh", 38, 4 * 3600 + 5), "seven_day": win("fresh", 54, 3 * 86400 + 9),
