@@ -111,6 +111,48 @@ and `--uninstall --force` removes the key.
 | `TRUEGAUGE_PROBE_S` | `600` | seconds between `/usage` reads (minimum 120) |
 | `TRUEGAUGE_MAX_AGE_S` | `900` | after this many seconds without a change a reading is shown as `≥` |
 | `TRUEGAUGE_HOME` | `~/.truegauge` | where the state lives |
+| `TRUEGAUGE_RED_5H` | `98` | red threshold of the 5-hour window (see Colors) |
+| `TRUEGAUGE_RED_7D` | `99` | red threshold of the weekly window |
+| `TRUEGAUGE_RED_COLOR` | `#ff0000` | `#rrggbb` or `ansi` |
+| `NO_COLOR` | unset | any non-empty value: no colour |
+
+## Colors
+
+A window group (time and percent together, e.g. `4h 98%`) turns **bold red** when that window's reading has
+reached a threshold:
+
+| Window | Threshold variable | Default |
+|---|---|---|
+| 5-hour | `TRUEGAUGE_RED_5H` | `98` |
+| weekly | `TRUEGAUGE_RED_7D` | `99` |
+
+A threshold is an integer 1..100, or `off` (also `0`) for never. Empty or unset means the default; anything else
+(`101`, `-1`, `97.5`, `abc`) is refused, the default is used, and `--show` names the refusal. Spaces around the
+value are ignored.
+
+How to set them: the main path is the `env` block of `~/.claude/settings.json`, which Claude Code documents as reaching every command it starts (so the status line too; not measured by the
+tests):
+
+```json
+{ "env": { "TRUEGAUGE_RED_5H": "95", "TRUEGAUGE_RED_7D": "off", "TRUEGAUGE_RED_COLOR": "#ff5500" } }
+```
+
+The second path is an `export` in your shell before starting Claude Code. `python truegauge.py --show` prints the
+values of **that shell only**: an `env` block in settings.json is seen by the status line itself, not by `--show`.
+
+- `TRUEGAUGE_RED_COLOR`: `#rrggbb` (any case, default `#ff0000`) or `ansi`. `ansi` is the bold red of your terminal
+  theme, so its shade depends on that theme (it can look crimson in some). A wrong value is refused like a
+  threshold. The group is closed with `ESC[22;39m` (bold off, default foreground), so nothing else is reset; the
+  space between groups is never coloured.
+- `NO_COLOR`: any non-empty value turns colour off entirely, and the output is then byte for byte the same as 0.1.
+  An empty value does not.
+- Only the two plan windows turn red. Fable, tokens and the context fill never do; a window that has reset has no
+  group at all.
+
+The colour follows the **raw reading**: red when the reading, rounded half up, is at or above the threshold. For a
+fresh reading that is the number you see. For an old one it is true too: an old `≥97%` can be red at threshold 98,
+because the reading behind it was 97.6 (shown as 98% while fresh) and usage inside a window only grows. Ageing
+changes the text (`98%` becomes `≥97%`), never the colour.
 
 ## Check it
 
