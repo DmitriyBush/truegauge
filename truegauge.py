@@ -43,6 +43,7 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime
 
 __version__ = "0.1.0"
 
@@ -212,16 +213,18 @@ def _valid(item):
             and _num(item.get("resets_at")) is not None)
 
 
-def update(payload, now=None):
-    """Merge one status-line payload into the state file. Returns the state after the merge."""
+def update(payload, now=None, response_at=None):
+    """Merge one status-line payload into the state file. Returns the state after the merge.
+    response_at: epoch of the last API reply in the main transcript -- the plan numbers in the payload come from a
+    reply, so they are confirmed current as of that moment even when they did not change."""
     if not isinstance(payload, dict):
         raise ValueError("status-line payload is not a JSON object")
     now = time.time() if now is None else now
     with _Lock():
-        return _update_locked(payload, now)
+        return _update_locked(payload, now, response_at)
 
 
-def _update_locked(payload, now):
+def _update_locked(payload, now, response_at=None):
     d, problem = _read()
     if problem == "unreadable":
         raise OSError("state file stayed unreadable after retries; update skipped, old state kept")
@@ -249,6 +252,9 @@ def _update_locked(payload, now):
         d.pop("updated_at", None)
     elif changed:
         d["updated_at"] = int(now)
+    ra = _num(response_at)
+    if got and problem != "corrupt" and ra is not None and ra <= now + 60 and ra > (_num(d.get("updated_at")) or 0):
+        d["updated_at"] = int(min(ra, now))  # a later reply re-confirms the same numbers; an idle replay does not
     d["last_ok_at"] = int(now)
     _save(d)
     return d
@@ -508,6 +514,16 @@ def _merge_spellings(rec):
     return out, changed
 
 
+def _epoch(ts):
+    """ISO time of a transcript line ("2026-10-09T08:12:33.123Z") -> epoch seconds, None if absent/unreadable."""
+    if not isinstance(ts, str) or not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
 def _tally_file(path, rec, key=None):
     """Read new complete lines of one JSONL. Each API message id keeps the MAX of each usage field over all its
     lines (Claude Code writes one message over several lines, not always adjacent). -> True if anything changed."""
@@ -536,7 +552,8 @@ def _tally_file(path, rec, key=None):
         if b'"usage"' not in line:
             continue
         try:
-            m = json.loads(line).get("message")
+            obj = json.loads(line)
+            m = obj.get("message")
         except (ValueError, AttributeError):
             st["bad_lines"] = st.get("bad_lines", 0) + 1
             continue
@@ -552,6 +569,9 @@ def _tally_file(path, rec, key=None):
             mid = "noid-%d" % st["noid"]
         old = ids.get(mid)
         ids[mid] = vals if old is None else [max(a, b) for a, b in zip(old, vals)]
+        ts = _epoch(obj.get("timestamp"))
+        if ts is not None and ts > (st.get("last_reply_at") or 0):
+            st["last_reply_at"] = ts
     st["offset"] += end + 1
     return True
 
@@ -599,7 +619,9 @@ def session_tokens(transcript_path, session_id):
             complete = False
     if bad:
         complete = False  # an unreadable line may have carried tokens: the count is a lower bound
-    return {"new": new, "cache_read": cr, "files": len(rec), "complete": complete, "bad_lines": bad}
+    main = rec.get(_file_key(transcript_path)) or {}
+    return {"new": new, "cache_read": cr, "files": len(rec), "complete": complete, "bad_lines": bad,
+            "last_reply_at": main.get("last_reply_at")}
 
 
 # ---------------------------------------------------------------- rendering
@@ -680,17 +702,17 @@ def render(st, tokens, ctx_pct, lang="en", ctx_tokens=None):
 
 def statusline(payload, now=None):
     now = time.time() if now is None else now
-    update(payload, now)
-    try:
-        maybe_start_probe(now)
-    except Exception as e:  # the probe is an extra; its failure must not cost the main line
-        _record_error("probe start: %s: %s" % (type(e).__name__, e))
-    st = read_state(now)
     tokens = None
     try:
         tokens = session_tokens(payload.get("transcript_path"), payload.get("session_id"))
     except Exception as e:
         _record_error("tokens: %s: %s" % (type(e).__name__, e))
+    update(payload, now, (tokens or {}).get("last_reply_at"))
+    try:
+        maybe_start_probe(now)
+    except Exception as e:  # the probe is an extra; its failure must not cost the main line
+        _record_error("probe start: %s: %s" % (type(e).__name__, e))
+    st = read_state(now)
     cw = payload.get("context_window")
     ctx = _num(cw.get("used_percentage")) if isinstance(cw, dict) else None
     cti = _num(cw.get("total_input_tokens")) if isinstance(cw, dict) else None

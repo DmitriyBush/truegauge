@@ -172,6 +172,13 @@ t = tg.session_tokens(tp, "s1")
 check("completed line read once", t["new"] == 117 + 3 + 4, t)
 t = tg.session_tokens(tp, "s1")
 check("re-reading adds nothing", t["new"] == 124, t)
+check("no timestamps -> no reply time", t.get("last_reply_at") is None, t)
+with open(tp, "a") as f:
+    line = json.loads(msg("m4", 0, 0, 0, 0))
+    line["timestamp"] = "2026-10-09T08:12:33.500Z"
+    f.write(json.dumps(line) + "\n")
+t = tg.session_tokens(tp, "s1")
+check("last reply time of the main transcript reported", t["last_reply_at"] == 1791533553.5, t)
 os.makedirs(os.path.join(d, "sess", "subagents"))
 with open(os.path.join(d, "sess", "subagents", "agent-a.jsonl"), "w") as f:
     f.write(msg("s1", 50, 0, 50, 7) + "\n")
@@ -410,6 +417,20 @@ check("ru letters", R({}, {"new": 2_640_000, "complete": True}, None, "ru", 548_
 check("incomplete total -> Σ≥", R({}, {"new": 2_640_000, "complete": False}) == "Σ≥2.6M",
       R({}, {"new": 2_640_000, "complete": False}))
 check("zero window tokens (no reading yet / after compact) -> no T and no 0% group", R({}, None, 0.0, cti=0) == "", R({}, None, 0.0, cti=0))
+# freshness follows the last API reply, not the last change of the number
+tg.update(rl(five=(7, NOW + 3 * 3600)), NOW - 2000)                 # first sighting 2000 s ago
+tg.update(rl(five=(7, NOW + 3 * 3600)), NOW, response_at=NOW - 30)    # same 7%, but a reply 30 s ago carried it
+check("unchanged number confirmed by a recent reply is fresh", tg.read_state(NOW)["five_hour"]["status"] == "fresh",
+      tg.read_state(NOW)["five_hour"])
+tg.update(rl(five=(7, NOW + 3 * 3600)), NOW + 1000, response_at=NOW - 30)  # idle: no new reply for 1030 s
+check("no new reply for longer than the limit -> stale", tg.read_state(NOW + 1000)["five_hour"]["status"] == "stale_reading",
+      tg.read_state(NOW + 1000)["five_hour"])
+tg.update(rl(five=(7, NOW + 3 * 3600)), NOW + 1001, response_at=NOW + 5000)  # reply time from the future: ignored
+check("reply time from the future does not make a reading fresh",
+      tg.read_state(NOW + 1001)["five_hour"]["status"] == "stale_reading", tg.read_state(NOW + 1001)["five_hour"])
+check("transcript time parsed", tg._epoch("2026-10-09T08:12:33.500Z") == 1791533553.5, tg._epoch("2026-10-09T08:12:33.500Z"))
+check("bad transcript time -> None", tg._epoch("yesterday") is None and tg._epoch(None) is None)
+fresh()
 check("zero window tokens with a fill -> both left out (no real reading)", R({}, None, 12.0, cti=0) == "", R({}, None, 12.0, cti=0))
 for n, want in ((2_650_000, "Σ≥2.6M"), (2_699_999, "Σ≥2.6M"), (999_999, "Σ≥999K"), (1_500, "Σ≥1K"), (812, "Σ≥812")):
     got = R({}, {"new": n, "complete": False})
