@@ -3,7 +3,7 @@
 
 Shows one short line, e.g. `4h 38% 3d 54% F4% T548K 55% Σ2.6M` (number and unit written together):
   4h 38%   5-hour window: time left (hours, then minutes under 1 h) and the share USED
-  3d 54%   weekly window: time left (days, then hours, then minutes) and the share used
+  3d 54%   weekly window: time left in whole days (0d in the last day) and the share used
   F4%      the weekly Fable window (separate allowance), share used
   T548K    tokens in the context window now
   55%      how full the context window is
