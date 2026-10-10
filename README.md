@@ -19,7 +19,7 @@ not left. A group whose data is unknown is left out, never shown as 0.
 | `Σ2.6M` | tokens spent in this session: input + cache writes + output, main conversation **and its subagents**, each API message once (cache reads are counted apart, see `--show`). `Σ≥2.6M` = a lower bound (a large transcript is still being read, or a line was unreadable) |
 
 Times are rounded down. Numbers: `812`, `548K`, `2.6M` (decimal point; with `TRUEGAUGE_LANG=ru` the letters
-`T K M` are Cyrillic). A percentage with `≥` (`≥38%`) is a stale reading: it can only have grown, so the number
+`T K M` are Cyrillic, with `en` they are Latin `T K M`; `h d m F Σ %` are the same in both). A percentage with `≥` (`≥38%`) is a stale reading: it can only have grown, so the number
 is a lower bound (rounded down). A window that has reset is left out until a new reading arrives.
 
 ## Why another status line
@@ -100,7 +100,8 @@ Add to `~/.claude/settings.json`:
 On Windows use the full path, for example `"python C:/Users/you/.claude/truegauge.py"`.
 `refreshInterval` keeps the time left moving while the session is quiet. `--uninstall` refuses on a line added
 this way (there is no saved previous line, so removing the key would drop it silently); it names the newest backup
-and `--uninstall --force` removes the key.
+and `--uninstall --force` removes the key. (If the file already has an `env` block, add the keys to it, for example `"TRUEGAUGE_LANG": "ru"`; do not
+paste a second `env`: it would wipe the keys already there.)
 
 ## Settings (environment variables)
 
@@ -171,6 +172,10 @@ What the line does **not** tell you:
 
 ## Cold cache (amber context group)
 
+**Not measured: do I get the data at all?** Claude Code 2.1.293: whether the `prompt_cache` fields arrive in the status
+line is not measured. No amber does NOT mean a warm cache: until `python truegauge.py --show` has shown
+`present=True`, the amber colour may never light up at all (the `cache:` line then says `cold now: unknown`).
+
 The context group (`T548K 55%`, both parts together) turns **amber** when the prompt cache of your main session has
 gone cold. A cold cache means the next message re-sends the whole context at full price instead of the cheap cached
 price, so this is the moment to think before sending a long-context message.
@@ -178,10 +183,13 @@ price, so this is the moment to think before sending a long-context message.
 - **Where the data comes from.** Claude Code's status-line input carries a `prompt_cache` object (its documentation:
   main session only, from v2.1.251; subagents are not counted). truegauge reads `caching_observed`, `warm` and
   `expires_at` from it.
-- **Cold** means: `caching_observed` is `true` AND (`warm` is `false` OR `expires_at` is a number that has passed).
+- **Cold** means: `caching_observed` is `true` AND (`warm` is `false` OR `expires_at` is a time in epoch SECONDS that has passed; a value outside 2017-07-14 .. 2100-01-01 (for example
+  milliseconds) is not judged: the unit is an assumption from the documentation, no live input has been seen).
   No `prompt_cache`, one of another type, caching not observed, or a field of the wrong type means **not cold**: no
-  data is never shown as cold. Claude Code restarts the line itself when a warm cache reaches `expires_at`, so the
-  amber appears without a new message.
+  data is never shown as cold. Claude Code's status line documentation (section "When the status line updates") says when the line is
+  re-run; truegauge relies on that for the amber to appear without a new message when a warm cache reaches
+  `expires_at`. If the line is not re-run at that moment, the amber appears at the next redraw (the documentation
+  text was not re-read for this version of the README).
 - **How long a cache lives.** On a subscription, within the plan, the main session's cache lives 1 hour; when usage
   goes over the plan it is 5 minutes, so amber appears more often then.
 - **What is not coloured.** `Σ` (tokens spent in the session, subagents included) is never coloured: the cache state
@@ -194,7 +202,10 @@ price, so this is the moment to think before sending a long-context message.
   red ones.
 - **Check that the data really arrives.** The status line keeps the last `prompt_cache` it saw in the state file, and
   `python truegauge.py --show` prints it: `cache: as the status line saw it at <time>: present=..., warm=..., ttl=...,
-  expires in N s / expired N s ago, recache_if_cold=..., cold now: yes/no`. `cache: no record yet` means the line has
+  expires in N s / expired N s ago, recache_if_cold=..., cold now: yes / no / unknown (reason)`. The time in that line
+  is when the record last CHANGED; the next line, `status line last call: <time> (accurate to 60 s; session ...)`,
+  is when the line last ran (the state file is shared by all sessions: the tags tell which session made the call
+  and which made the change). `cache: no record yet` means the line has
   not run since this version was installed; `present=False` means Claude Code did not send the object (then amber
   never appears, by the rule above). The arrival of `prompt_cache` on a given install is not asserted by the tests.
 
@@ -221,7 +232,10 @@ and the cache is warm, the line is byte for byte the same as without the setting
 
 Rules for the list: any case, spaces around an element are ignored, order does not matter, a repeat (`bold,bold`) is
 harmless. **One unknown element refuses the whole setting**: no mark at all (nothing is switched on halfway), and
-`--show` names the element. The words of the first 0.3 draft, `brackets` and `both`, are not valid any more.
+`--show` names the element. **If the mark is not visible,** run `python truegauge.py --show`: the line
+`status line cold colour: ...; mark: ...` is what the running line really used, and a
+`REFUSED (default used): TRUEGAUGE_MARK=...` part names a value that was rejected (nothing is added to the status line itself, and the
+refusal is also written to the error record). The words of the first 0.3 draft, `brackets` and `both`, are not valid any more.
 
 Example, a line with the 5-hour window past its threshold and a cold cache (`ESC` sequences are invisible; this is
 the text you see):
@@ -261,7 +275,9 @@ restart of your own process.
    valid JSON, **stop**: do not create or rewrite it, ask the human.
 2. **Make a copy first**: `settings.json.bak-<date>` next to it.
 3. **Read, add the key, write back; never replace the block.** The `env` object may already hold other keys; they
-   must survive. If `env` exists and is not an object, stop. A ready snippet (change the two lines `KEY`/`VALUE`):
+   must survive. If `env` exists and is not an object, stop. Also look for the same key in the project's
+   `.claude/settings.json` and `.claude/settings.local.json`: a project or local setting can take precedence over the
+   user file, and then your change would not show. A ready snippet (change the two lines `KEY`/`VALUE`):
 
    ```python
    import json, os, shutil, time
@@ -290,10 +306,12 @@ restart of your own process.
    ```
 
    Use the last form's idea for several settings at once: all keys go into the same `env` object.
-5. **Check.** `python truegauge.py --show` (run it with the same settings in your shell if you want to see the
-   verdict at once: `TRUEGAUGE_MARK=all python truegauge.py --show`). Look for `mark: underline,braces,bold` and
-   that no `REFUSED (default used)` line mentions the variable. The line `status line ... mark: ...` shows what the
-   running status line used; it is updated when the line is redrawn.
+5. **Check.** Success is the line `status line cold colour: ...; mark: <your value>` in `python truegauge.py --show`
+   AFTER the status line has been redrawn: it holds what the running line actually used. A variable set in your
+   shell proves nothing about the running line (it changes only the lines marked "THIS shell"). Also make sure no
+   `REFUSED (default used)` part mentions the variable. Shell syntax differs: bash `python truegauge.py --show`; for a
+   preview of a value in PowerShell: `$env:TRUEGAUGE_MARK = "all"; python truegauge.py --show`; in cmd:
+   `set TRUEGAUGE_MARK=all && python truegauge.py --show` (`TRUEGAUGE_MARK=all python ...` works in bash only).
 6. **When it takes effect.** The status line reads its settings at every redraw, so the change should show at the next
    redraw. Whether Claude Code re-reads `settings.json` `env` without a restart is **not measured**: if the
    `status line ... mark:` line still shows the old value after a few redraws, ask the human to restart Claude Code.

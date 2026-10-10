@@ -25,7 +25,8 @@ Colors (0.2): a window group (time + percent) turns red when the reading has rea
   has no group. Threshold: an integer 1..100, or `off` / `0` = never; empty or unset = default; anything else
   = default, and `--show` names the refusal. TRUEGAUGE_RED_COLOR: `#rrggbb` (default #ff0000) or `ansi`
   (bold red of your terminal theme). The group is wrapped in `ESC[1;..m ... ESC[22;39m`; the space between groups
-  is not. NO_COLOR set to anything non-empty: no colour at all (output identical to 0.1).
+  is not. NO_COLOR set to anything non-empty: no colour at all (output identical to 0.1, except for a mark set by
+  TRUEGAUGE_MARK, which NO_COLOR does not remove).
 
 Cold cache (0.3): the context group (`T548K 55%`, both parts together) turns amber when the main session's prompt
 cache has gone cold. Claude Code's status-line input carries `prompt_cache` (main session only, not subagents):
@@ -83,6 +84,10 @@ WINDOWS = ("five_hour", "seven_day", "spend_limit")
 MAX_AHEAD = {"five_hour": 6 * 3600, "seven_day": 8 * 86400, "spend_limit": 400 * 86400}
 EPOCH_MIN, EPOCH_MAX = 1e9, 1e11
 ERRLOG_CAP = 64 * 1024
+# prompt_cache.expires_at is read as epoch SECONDS (an assumption from the documentation, no live input seen):
+# 2017-07-14 .. 2100-01-01. A separate pair: the plan-window check above keeps its own bounds.
+CACHE_EPOCH_MIN, CACHE_EPOCH_MAX = 1_500_000_000, 4_102_444_800
+RUN_EVERY_S = 60  # how often the status line's own last-call time is refreshed in the state file
 FABLE_LINE = re.compile(r"Current week \(Fable\):\s*(\d+(?:\.\d+)?)%\s*used(?:\s*\S\s*resets\s+(.+?))?\s*$", re.M)
 WEEK_LINE = re.compile(r"Current week \(all models\):\s*(\d+(?:\.\d+)?)%\s*used(?:\s*\S\s*resets\s+(.+?))?\s*$", re.M)
 
@@ -818,13 +823,42 @@ def _cache_cold(pc, now):
     """The ONE decision "the main session's prompt cache has gone cold" (the line and --show both use it).
     Cold = `prompt_cache` is an object, caching_observed is True, and (warm is False OR expires_at is a number
     that has passed). No data, a wrong type, or caching not observed = not cold: a guess is not shown as a reading.
-    warm that is not a bool is unknown, so it decides nothing; expires_at that is not a number is not judged."""
+    warm that is not a bool is unknown, so it decides nothing; expires_at that is not a number of epoch seconds (see _expiry) is not judged."""
     if not isinstance(pc, dict) or pc.get("caching_observed") is not True:
         return False
     if pc.get("warm") is False:
         return True
-    exp = _num(pc.get("expires_at"))
+    exp = _expiry(pc.get("expires_at"))[0]
     return exp is not None and now >= exp
+
+
+def _expiry(v):
+    """-> (epoch seconds | None, why | None). Only a finite number inside CACHE_EPOCH_MIN..CACHE_EPOCH_MAX counts as
+    a time; milliseconds (or anything else) are "unknown" with the reason, never compared with `now`."""
+    n = _num(v)
+    if n is None:
+        return None, "expires_at: type %s" % type(v).__name__
+    if not CACHE_EPOCH_MIN <= n <= CACHE_EPOCH_MAX:
+        return None, "expires_at %r is outside the range of epoch seconds" % (v,)
+    return n, None
+
+
+def _cache_verdict(pc, now):
+    """-> ("yes" | "no" | "unknown", why | None) for --show. "yes" is exactly _cache_cold; "unknown" is a cache whose
+    state the input does not let us tell (no object, caching_observed not a bool, no usable expires_at)."""
+    if _cache_cold(pc, now):
+        return "yes", None
+    if not isinstance(pc, dict):
+        return "unknown", "no prompt_cache object"
+    obs = pc.get("caching_observed")
+    if obs is False:
+        return "no", "caching not observed"
+    if obs is not True:
+        return "unknown", "caching_observed: " + ("absent" if obs is None else "type %s" % type(obs).__name__)
+    exp, why = _expiry(pc.get("expires_at"))
+    if exp is None:
+        return "unknown", why
+    return "no", None
 
 
 def _decorate(group, paint, mark):
@@ -893,26 +927,40 @@ def render(st, tokens, ctx_pct, lang="en", ctx_tokens=None, cold=False):
     return " ".join(parts)
 
 
-def _remember_render_cfg(cc, now):
-    """Keep the colour settings the status line ACTUALLY used (its `env` block in settings.json is invisible to a
-    shell, so --show cannot recompute them). Written only when they differ from the saved ones: the line runs often.
-    A new non-empty refusal is recorded as an error, once per change."""
+def _same(a, b):
+    """Equal as JSON text: `True == 1` and `1 == 1.0` in Python, but a type change is a change of the record."""
+    return json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
+
+
+def _cfg_apply(d, cc, now):
+    """Put the colour settings the status line ACTUALLY used into the state dict `d` (its `env` block in settings.json
+    is invisible to a shell, so --show cannot recompute them). Only when they differ from the saved ones: the line runs
+    often. -> (changed, error text | None); the text is set for a NEW non-empty refusal, once per change."""
     cfg = {"th": dict(cc["th"]), "sgr": cc["sgr"], "cold_sgr": cc["cold_sgr"], "mark": cc["mark"],
            "no_color": bool(cc["no_color"]), "refused": dict(cc["refused"])}
+    old = d.get("render_cfg")
+    if _same(old, cfg):
+        return False, None
+    d["render_cfg"] = cfg
+    d["render_cfg_at"] = int(now)
+    new_refusal = bool(cfg["refused"]) and (not isinstance(old, dict) or old.get("refused") != cfg["refused"])
+    if not new_refusal:
+        return True, None
+    return True, ("colour setting refused (default used): %s"
+                  % "; ".join("%s=%s" % kv for kv in sorted(cfg["refused"].items())))
+
+
+def _remember_render_cfg(cc, now):
+    """One colour-settings record under its own lock (the status line itself uses _remember: one lock for both)."""
     with _Lock():
         d, problem = _read()
         if problem not in (None, "missing"):
             return
-        old = d.get("render_cfg")
-        if old == cfg:
-            return
-        d["render_cfg"] = cfg
-        d["render_cfg_at"] = int(now)
-        _save(d)
-        new_refusal = bool(cfg["refused"]) and (not isinstance(old, dict) or old.get("refused") != cfg["refused"])
-    if new_refusal:
-        _record_error("colour setting refused (default used): %s"
-                      % "; ".join("%s=%s" % kv for kv in sorted(cfg["refused"].items())))
+        changed, err = _cfg_apply(d, cc, now)
+        if changed:
+            _save(d)
+    if err:
+        _record_error(err)
 
 
 def _pc_value(v):
@@ -930,23 +978,74 @@ def _pc_value(v):
 PC_FIELDS = ("warm", "caching_observed", "ttl", "expires_at", "recache_tokens_if_cold")
 
 
-def _remember_cache(payload, now):
+def _sid8(payload):
+    """The first 8 characters of the payload's session_id (a short tag to tell sessions apart), else None."""
+    sid = payload.get("session_id") if isinstance(payload, dict) else None
+    return re.sub(r"[^A-Za-z0-9_-]", "_", sid)[:8] if isinstance(sid, str) and sid else None
+
+
+def _cache_apply(d, payload, now):
     """Instrument for the first-hand check of the input: keep the LAST `prompt_cache` the status line saw, compactly
-    (`present` False when there is no object). Written only when it differs from the saved one (not counting
-    seen_at): the line runs often, and expires_at moves only with a new reply."""
+    (`present` False when there is no object). `prompt_cache_seen` is rewritten only when it differs from the saved one
+    (not counting seen_at, the time of that CHANGE): the line runs often, and expires_at moves only with a new reply.
+    `prompt_cache_run` = the status line's own last call {at, sid, changed_sid}, refreshed at most once per RUN_EVERY_S
+    (or with a change of the record): `at` is accurate to that step; sid = the session that made the call, changed_sid =
+    the session that made the last change of the record (the two can differ: the state file is shared by all sessions).
+    -> True when `d` was modified."""
     pc = payload.get("prompt_cache") if isinstance(payload, dict) else None
     rec = {"present": isinstance(pc, dict)}
     for k in PC_FIELDS:
         rec[k] = _pc_value(pc.get(k)) if isinstance(pc, dict) else None
+    sid = _sid8(payload)
+    old = d.get("prompt_cache_seen")
+    run = d.get("prompt_cache_run")
+    run_ok = isinstance(run, dict) and _num(run.get("at")) is not None
+    rec_changed = not (isinstance(old, dict) and _same({k: v for k, v in old.items() if k != "seen_at"}, rec))
+    if rec_changed:
+        d["prompt_cache_seen"] = dict(rec, seen_at=int(now))
+    if rec_changed or not run_ok or not 0 <= now - run["at"] < RUN_EVERY_S:
+        d["prompt_cache_run"] = {"at": int(now), "sid": sid,
+                                 "changed_sid": sid if rec_changed else (run.get("changed_sid") if run_ok else None)}
+        return True
+    return False
+
+
+def _remember_cache(payload, now):
+    """One cache record under its own lock (the status line itself uses _remember: one lock for both)."""
     with _Lock():
         d, problem = _read()
         if problem not in (None, "missing"):
             return
-        old = d.get("prompt_cache_seen")
-        if isinstance(old, dict) and {k: v for k, v in old.items() if k != "seen_at"} == rec:
+        if _cache_apply(d, payload, now):
+            _save(d)
+
+
+def _remember(payload, cc, now):
+    """What the status line keeps in the state file on EVERY call: its colour settings and the last prompt_cache.
+    ONE lock, one read, one write (a new writer on every reply must not triple the lock traffic). The two parts are
+    isolated: a fault in one costs that record, the other is still written; the faults are recorded after the lock."""
+    errs = []
+    with _Lock():
+        d, problem = _read()
+        if problem not in (None, "missing"):
             return
-        d["prompt_cache_seen"] = dict(rec, seen_at=int(now))
-        _save(d)
+        changed = False
+        if cc is not None:
+            try:
+                c, err = _cfg_apply(d, cc, now)
+                changed = changed or c
+                if err:
+                    errs.append(err)
+            except Exception as e:  # an extra; its failure must not cost the main line
+                errs.append("colour settings: %s: %s" % (type(e).__name__, e))
+        try:
+            changed = _cache_apply(d, payload, now) or changed
+        except Exception as e:  # an extra (the measuring instrument); its failure must not cost the main line
+            errs.append("cache record: %s: %s" % (type(e).__name__, e))
+        if changed:
+            _save(d)
+    for e in errs:
+        _record_error(e)
 
 
 def _saved_render_cfg(d):
@@ -977,13 +1076,14 @@ def statusline(payload, now=None):
     except Exception as e:  # the probe is an extra; its failure must not cost the main line
         _record_error("probe start: %s: %s" % (type(e).__name__, e))
     try:
-        _remember_render_cfg(color_config(), now)
+        cc = color_config()
     except Exception as e:  # an extra; its failure must not cost the main line
         _record_error("colour settings: %s: %s" % (type(e).__name__, e))
+        cc = None
     try:
-        _remember_cache(payload, now)
-    except Exception as e:  # an extra (the measuring instrument); its failure must not cost the main line
-        _record_error("cache record: %s: %s" % (type(e).__name__, e))
+        _remember(payload, cc, now)
+    except Exception as e:  # the state file could not be read or written: the main line stays
+        _record_error("state record: %s: %s" % (type(e).__name__, e))
     try:
         cold = _cache_cold(payload.get("prompt_cache"), now)
     except Exception as e:  # SF4 cold test: no colour, the line stays
@@ -1000,8 +1100,18 @@ def _th_name(n):
     return "off" if n is None else str(n)
 
 
+def _fmt_time(t):
+    """A local date and time for an epoch value; a value that is not a time (huge, negative, odd) is shown as it is."""
+    try:
+        return datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S")
+    except (OverflowError, OSError, ValueError, TypeError):
+        return "? (%r is not a time)" % (t,)
+
+
 def _show_cache(d, now=None):
-    """The `cache:` line: what the status line last saw as prompt_cache, and whether that reads as cold now."""
+    """The `cache:` line: what the status line last saw as prompt_cache, and whether that reads as cold now
+    (yes / no / unknown with the reason). The record's time is the time of its last CHANGE; the status line's last
+    call is the next line (accurate to RUN_EVERY_S; each carries the tag of the session that made it)."""
     now = time.time() if now is None else now
     rec = d.get("prompt_cache_seen")
     if rec is None:
@@ -1010,22 +1120,31 @@ def _show_cache(d, now=None):
     if not isinstance(rec, dict) or _num(rec.get("seen_at")) is None or not isinstance(rec.get("present"), bool):
         print("cache: the record is damaged; the status line rewrites it on its next call")
         return
-    at = datetime.fromtimestamp(rec["seen_at"]).strftime("%Y-%m-%d %H:%M:%S")
+    run = d.get("prompt_cache_run")
+    run = run if isinstance(run, dict) and _num(run.get("at")) is not None else None
+    at = _fmt_time(rec["seen_at"])
+    sid = "" if run is None or not run.get("changed_sid") else " (session %s)" % run["changed_sid"]
     if not rec["present"]:
-        print("cache: as the status line saw it at %s: present=False (no prompt_cache in its input), cold now: no" % at)
-        return
-    exp = _num(rec.get("expires_at"))
-    if exp is None:
-        when = "expires_at=%r" % (rec.get("expires_at"),)
-    elif now >= exp:
-        when = "expired %d s ago" % int(now - exp)
+        print("cache: as the status line saw it at %s%s: present=False (no prompt_cache in its input), cold now: unknown "
+              "(no prompt_cache object)" % (at, sid))
     else:
-        when = "expires in %d s" % int(exp - now)
-    cold = _cache_cold(rec, now)
-    print("cache: as the status line saw it at %s: present=True, caching_observed=%r, warm=%r, ttl=%r, %s, "
-          "recache_if_cold=%r, cold now: %s"
-          % (at, rec.get("caching_observed"), rec.get("warm"), rec.get("ttl"), when,
-             rec.get("recache_tokens_if_cold"), "yes" if cold else "no"))
+        exp, why = _expiry(rec.get("expires_at"))
+        if exp is None:
+            when = "expires_at=%r" % (rec.get("expires_at"),)
+        elif now >= exp:
+            when = "expired %d s ago" % int(now - exp)
+        else:
+            when = "expires in %d s" % int(exp - now)
+        verdict, vwhy = _cache_verdict(rec, now)
+        print("cache: as the status line saw it at %s%s: present=True, caching_observed=%r, warm=%r, ttl=%r, %s, "
+              "recache_if_cold=%r, cold now: %s"
+              % (at, sid, rec.get("caching_observed"), rec.get("warm"), rec.get("ttl"), when,
+                 rec.get("recache_tokens_if_cold"), verdict + (" (%s)" % vwhy if vwhy else "")))
+    if run is None:
+        print("status line last call: not recorded yet (the record above changed at %s)" % at)
+    else:
+        print("status line last call: %s (accurate to %d s; session %s); record changed: %s"
+              % (_fmt_time(run["at"]), RUN_EVERY_S, run.get("sid") or "?", at))
 
 
 def show():

@@ -19,6 +19,11 @@ os.makedirs(os.path.join(SANDBOX, ".claude"))
 for _k, _v in (("HOME", SANDBOX), ("USERPROFILE", SANDBOX), ("CLAUDE_CONFIG_DIR", os.path.join(SANDBOX, ".claude")),
                ("TRUEGAUGE_HOME", os.path.join(SANDBOX, ".truegauge"))):
     os.environ[_k] = _v
+# No real `claude -p /usage` from the checks (measured 2026-10-10: one run started 12 claude.exe, 1.1 GB; the mutation
+# run repeats the suite hundreds of times). The probe checks switch it on locally and inject their own spawn.
+os.environ["TRUEGAUGE_FABLE"] = "0"
+os.environ["PATH"] = os.pathsep.join(x for x in os.environ.get("PATH", "").split(os.pathsep)
+                                     if "claude-code" not in x.lower() and not x.lower().rstrip("\\/").endswith("npm"))
 # Colour settings of the person running the tests must not reach the checks (a TRUEGAUGE_RED_5H=50 in their shell
 # would turn every 0.1 check at >= 50% into a false FAIL); the colour checks set what they need themselves.
 for _k in ("TRUEGAUGE_RED_5H", "TRUEGAUGE_RED_7D", "TRUEGAUGE_RED_COLOR", "TRUEGAUGE_COLD_COLOR", "TRUEGAUGE_MARK", "NO_COLOR"):
@@ -171,6 +176,7 @@ check("Fable 140% rejected", "fable" not in tg.read_state(NOW) or tg.read_state(
 
 # ---- probe interval: 599 s no, 600 s yes; off switch
 fresh()
+os.environ["TRUEGAUGE_FABLE"] = "1"  # on for these checks only; the spawn is injected, nothing real starts
 calls = []
 tg.maybe_start_probe(NOW, spawn=lambda: calls.append(1))
 tg.maybe_start_probe(NOW + 599, spawn=lambda: calls.append(1))
@@ -179,7 +185,7 @@ tg.maybe_start_probe(NOW + 600, spawn=lambda: calls.append(1))
 check("probe at 600 s started", len(calls) == 2, calls)
 os.environ["TRUEGAUGE_FABLE"] = "0"
 check("TRUEGAUGE_FABLE=0 -> never", tg.maybe_start_probe(NOW + 99999, spawn=lambda: calls.append(1)) is False)
-del os.environ["TRUEGAUGE_FABLE"]
+os.environ["TRUEGAUGE_FABLE"] = "0"  # back to the run-wide setting
 
 
 # ---- session tokens: split messages counted once, partial line waits, subagents added, truncation restarts
@@ -252,6 +258,7 @@ check("stale used value rounds DOWN (21.9 -> >=21%)",
       tg._used({"status": "stale_reading", "used_percentage": 21.9}) == "≥21%")
 fresh()
 os.environ["TRUEGAUGE_PROBE_S"] = "120"
+os.environ["TRUEGAUGE_FABLE"] = "1"  # on for these checks only; the spawn is injected
 calls = []
 tg.maybe_start_probe(NOW, spawn=lambda: calls.append(1))
 tg.maybe_start_probe(NOW + 200, spawn=lambda: calls.append(1))
@@ -259,6 +266,7 @@ check("unfinished probe blocks a new one for 300 s", len(calls) == 1, calls)
 tg.maybe_start_probe(NOW + 300, spawn=lambda: calls.append(1))
 check("after 300 s a hung probe no longer blocks", len(calls) == 2, calls)
 del os.environ["TRUEGAUGE_PROBE_S"]
+os.environ["TRUEGAUGE_FABLE"] = "0"
 
 d = fresh()
 tp = os.path.join(d, "s.jsonl")
@@ -1151,7 +1159,7 @@ sl(60, {"TRUEGAUGE_RED_5H": "50"}, _n)  # the status line (its env) has 50; this
 with envset():
     out = cli("--show")[1]
 check("SF2: --show verdict follows the status line's threshold (50), not the shell's (98)",
-      "five_hour: past the red threshold: yes" in out and "unknown" not in out, out)
+      "five_hour: past the red threshold: yes" in out and "unknown (the status line" not in out, out)  # "cold now: unknown" is a different line
 check("SF2: --show labels the status-line settings with the time it saw them",
       "status line colour: thresholds 5h=50 week=99" in out and "as the status line saw it at" in out, out)
 check("SF2: the shell's own values stay on their own line", "colour: thresholds 5h=98 week=99" in out and "values of THIS shell" in out, out)
@@ -1221,7 +1229,7 @@ for var in ("TRUEGAUGE_RED_5H", "TRUEGAUGE_RED_7D", "TRUEGAUGE_RED_COLOR"):
 # (table of boundaries: 01_PROEKT.md section 2; now = 1000000)
 AMB = "\033[1;38;2;255;175;0m"
 UL, ULX = "\033[4m", "\033[24m"
-CNOW = 1_000_000
+CNOW = 1_800_000_000  # a plausible epoch: expires_at outside CACHE_EPOCH_MIN..MAX is "unknown" (item 6)
 CTX = "T548K 55%"
 
 
@@ -1522,8 +1530,8 @@ sl_pc(ABSENT, _n)
 r = cache_rec()
 check("cache record: no prompt_cache -> present=False, every field empty",
       isinstance(r, dict) and r["present"] is False and r["warm"] is None and r["expires_at"] is None and r["seen_at"] == int(_n), r)
-check("cache record: --show says present=False and cold now: no",
-      "present=False" in cli("--show")[1] and "cold now: no" in cli("--show")[1], cli("--show")[1])
+check("cache record: --show says present=False and cold now: unknown (finding 4: no data is not 'no')",
+      "present=False" in cli("--show")[1] and "cold now: unknown (no prompt_cache object)" in cli("--show")[1], cli("--show")[1])
 sl_pc(ABSENT, _n + 50)
 check("cache record: the same thing again -> not rewritten (seen_at unchanged)", cache_rec()["seen_at"] == int(_n), cache_rec())
 pcx = {"warm": True, "caching_observed": True, "ttl": "1h", "expires_at": int(_n) + 3000, "recache_tokens_if_cold": 548200,
@@ -1589,7 +1597,7 @@ check("statusline: amber is the only difference between cold and warm lines", SG
 # SF4 for the new code: a fault costs the colour or the record, never the line
 fresh()
 _n = time.time()
-for what in ("_cache_cold", "_decorate", "_remember_cache", "_cold_sgr", "_mark"):
+for what in ("_cache_cold", "_decorate", "_cache_apply", "_cfg_apply", "_cold_sgr", "_mark"):
     fresh()
     orig = getattr(tg, what)
 
@@ -1613,6 +1621,239 @@ try:
 finally:
     tg._cache_cold = orig
 check("SF4 (0.3): the cold test failing means not cold (no amber, no error escape)", AMB not in line and CTX in line, line)
+
+# ---- 0.3 lens findings (order 20, 2026-10-10): every check carries its finding number
+def sl_sid(pc, now, sid, env=None):
+    with envset(**(env or {})):
+        return sl_pc(pc, now, session_id=sid)
+
+
+# finding 3: the status line's own last call is kept apart from the time the record CHANGED, refreshed once per 60 s
+fresh()
+_n = int(time.time())
+sl_pc(pcx, _n)
+check("finding 3: first call -> run record {at, sid, changed_sid} written", state_now().get("prompt_cache_run") == {"at": _n, "sid": None, "changed_sid": None}, state_now().get("prompt_cache_run"))
+sl_pc(pcx, _n + 30)
+check("finding 3: the same record 30 s later -> the last-call time is NOT rewritten", state_now()["prompt_cache_run"]["at"] == _n, state_now()["prompt_cache_run"])
+sl_pc(pcx, _n + 59)
+check("finding 3: 59 s later -> still not rewritten (boundary)", state_now()["prompt_cache_run"]["at"] == _n)
+sl_pc(pcx, _n + 60)
+check("finding 3: 60 s later -> the last-call time moves, the record's change time does not",
+      state_now()["prompt_cache_run"]["at"] == _n + 60 and cache_rec()["seen_at"] == _n, (state_now()["prompt_cache_run"], cache_rec()))
+sl_pc(dict(pcx, expires_at=int(_n) + 3300), _n + 70)
+check("finding 3: a changed record -> both times move at once", state_now()["prompt_cache_run"]["at"] == _n + 70 and cache_rec()["seen_at"] == _n + 70)
+sl_pc(dict(pcx, expires_at=int(_n) + 3300), _n + 10)
+check("finding 3: the clock went back -> the last-call time follows (not frozen in the future)", state_now()["prompt_cache_run"]["at"] == _n + 10, state_now()["prompt_cache_run"])
+_out = cli("--show")[1]
+check("finding 3: --show names the last call, its accuracy and the record's change time on a separate line",
+      "status line last call: " in _out and "accurate to 60 s" in _out and "record changed: " in _out, _out)
+check("finding 3: the `cache:` line is still ONE line", len([x for x in _out.splitlines() if x.startswith("cache:")]) == 1)
+d = state_now()
+d.pop("prompt_cache_run")
+tg._save(d)
+check("finding 3: no run record (a state written before this version) -> --show says so, does not crash",
+      "status line last call: not recorded yet" in cli("--show")[1])
+d = state_now()
+d["prompt_cache_run"] = {"at": "yesterday"}
+tg._save(d)
+sl_pc(dict(pcx, expires_at=int(_n) + 3300), _n + 200)
+check("finding 3: a damaged run record is rewritten by the next call", state_now()["prompt_cache_run"]["at"] == _n + 200, state_now()["prompt_cache_run"])
+
+# finding 5: which session made the call and which made the change (the state file is shared by all sessions)
+fresh()
+_n = int(time.time())
+sl_sid(pcx, _n, "aaaaaaaa-1111-2222")
+sl_sid(dict(pcx, expires_at=int(_n) + 3300), _n + 10, "bbbbbbbb-3333-4444")
+check("finding 5: the session that CHANGED the record is stored (first 8 characters)",
+      state_now()["prompt_cache_run"] == {"at": _n + 10, "sid": "bbbbbbbb", "changed_sid": "bbbbbbbb"}, state_now()["prompt_cache_run"])
+sl_sid(dict(pcx, expires_at=int(_n) + 3300), _n + 80, "aaaaaaaa-1111-2222")
+check("finding 5: the last CALL and the last CHANGE may belong to different sessions",
+      state_now()["prompt_cache_run"] == {"at": _n + 80, "sid": "aaaaaaaa", "changed_sid": "bbbbbbbb"}, state_now()["prompt_cache_run"])
+_out = cli("--show")[1]
+check("finding 5: --show prints both session tags", "(session bbbbbbbb)" in _out and "session aaaaaaaa" in _out, _out)
+check("finding 5: session_id is not part of the compared record (a new session alone does not rewrite it)", cache_rec()["seen_at"] == _n + 10, cache_rec())
+check("finding 5: sid of odd shapes -> None / sanitised", (tg._sid8({"session_id": None}), tg._sid8({"session_id": 5}), tg._sid8({"session_id": ""}),
+      tg._sid8({"session_id": "ab/../cdefgh"}), tg._sid8([])) == (None, None, None, "ab____cd", None))
+
+# finding 6: the unit of expires_at (seconds is an assumption from the documentation; milliseconds must not pass for seconds)
+check("finding 6: bounds (seconds, 2017-07-14 .. 2100-01-01)", (tg.CACHE_EPOCH_MIN, tg.CACHE_EPOCH_MAX) == (1_500_000_000, 4_102_444_800))
+for _v, _ok in ((1_500_000_000, True), (1_499_999_999, False), (4_102_444_800, True), (4_102_444_801, False), (1_800_000_000.5, True),
+                (1_791_600_000_000, False), ("2026-10-10T10:00:00Z", False), (True, False), (None, False), (float("nan"), False), ([1], False)):
+    check("finding 6: _expiry(%r) -> %s" % (_v, "seconds" if _ok else "unknown with a reason"),
+          (tg._expiry(_v)[0] is not None) == _ok and (_ok or bool(tg._expiry(_v)[1])), tg._expiry(_v))
+check("finding 6: the reason for milliseconds says 'outside the range of epoch seconds'", "outside the range of epoch seconds" in tg._expiry(1_791_600_000_000)[1])
+check("finding 6: the reason for a string names the type", "type str" in tg._expiry("2026-10-10")[1], tg._expiry("2026-10-10"))
+_ms = 1_791_600_000_000  # 2026-10-10 in milliseconds
+fresh()
+with envset():
+    check("finding 6: expires_at in MILLISECONDS (past) -> not cold, not amber", ctxline(PC(exp=_ms), now=1_800_000_000) == CTX)
+    check("finding 6: warm=false still wins when expires_at is in milliseconds", ctxline(PC(warm=False, exp=_ms), now=1_800_000_000) == amber(CTX))
+    check("finding 6: expires_at as an ISO string -> not judged, not amber", ctxline(PC(exp="2026-01-01T00:00:00Z"), now=1_800_000_000) == CTX)
+
+# finding 4: cold now is yes / no / unknown (reason)
+_N = 1_800_000_000
+for label, pc, want in (("no prompt_cache", None, ("unknown", "no prompt_cache object")),
+                        ("prompt_cache not an object", "cold", ("unknown", "no prompt_cache object")),
+                        ("caching_observed false", {"caching_observed": False, "warm": True}, ("no", "caching not observed")),
+                        ("caching_observed absent", {"warm": True, "expires_at": _N + 5}, ("unknown", "caching_observed: absent")),
+                        ("caching_observed a string", {"caching_observed": "true"}, ("unknown", "caching_observed: type str")),
+                        ("warm, expires_at absent", {"caching_observed": True, "warm": True}, ("unknown", "expires_at: type NoneType")),
+                        ("warm, expires_at in ms", {"caching_observed": True, "warm": True, "expires_at": _ms}, ("unknown", "outside the range")),
+                        ("warm, expires_at later", {"caching_observed": True, "warm": True, "expires_at": _N + 5}, ("no", None)),
+                        ("warm, expires_at passed", {"caching_observed": True, "warm": True, "expires_at": _N - 5}, ("yes", None)),
+                        ("warm=false, no time", {"caching_observed": True, "warm": False}, ("yes", None))):
+    v, why = tg._cache_verdict(pc, _N)
+    check("finding 4: verdict for %s -> %s" % (label, want[0]), v == want[0] and (want[1] is None or (why is not None and want[1] in why)), (v, why))
+    check("finding 4: 'yes' agrees with _cache_cold for %s" % label, (v == "yes") == tg._cache_cold(pc, _N))
+fresh()
+_t = time.time()
+sl_pc(dict(pcx, expires_at=_ms), _t)
+_out = cli("--show")[1]
+check("finding 4: --show for a millisecond expires_at prints 'cold now: unknown (...outside the range of epoch seconds)'",
+      "cold now: unknown (expires_at " in _out and "outside the range of epoch seconds" in _out, _out)
+sl_pc(dict(pcx, expires_at=int(_t) + 100, warm=True), _t + 1)
+check("finding 4: a usable time -> plain 'cold now: no'", "cold now: no" in cli("--show")[1] and "cold now: no (" not in cli("--show")[1])
+
+# finding 9: a huge or odd seen_at does not break --show
+fresh()
+sl_pc(pcx, time.time())
+for _bad in (1e30, -1e30, 10 ** 20):
+    d = state_now()
+    d["prompt_cache_seen"]["seen_at"] = _bad
+    tg._save(d)
+    _c, _out, _e = cli("--show")
+    check("finding 9: seen_at=%r -> --show still answers and says it is not a time" % (_bad,), _c == 0 and "is not a time" in _out, (_c, _out[-300:], _e))
+
+# finding 11: a change of TYPE is a change (True == 1 in Python, not in the record)
+fresh()
+_n = int(time.time())
+sl_pc(pcx, _n)
+sl_pc(dict(pcx, warm=1), _n + 5)
+check("finding 11: warm True -> 1 rewrites the record (type is evidence)", cache_rec()["warm"] == 1 and type(cache_rec()["warm"]) is int and cache_rec()["seen_at"] == _n + 5, cache_rec())
+check("finding 11: _same tells True from 1 and 1 from 1.0, ignores key order",
+      not tg._same({"a": True}, {"a": 1}) and not tg._same({"a": 1}, {"a": 1.0}) and tg._same({"a": 1, "b": 2}, {"b": 2, "a": 1}))
+fresh()
+with envset():
+    tg._remember_render_cfg(tg.color_config(), _n)
+_d = state_now()
+_d["render_cfg"]["no_color"] = 0
+tg._save(_d)
+with envset():
+    tg._remember_render_cfg(tg.color_config(), _n + 9)
+check("finding 11: render_cfg no_color 0 (saved) vs False (now) -> rewritten", state_now()["render_cfg"]["no_color"] is False and state_now()["render_cfg_at"] == _n + 9, state_now().get("render_cfg"))
+
+# finding 10: the status line writes its two records under ONE lock and one write; the parts are isolated
+class _LockSpy(object):
+    n = 0
+
+
+_orig_enter = tg._Lock.__enter__
+
+
+def _spy_enter(self):
+    _LockSpy.n += 1
+    return _orig_enter(self)
+
+
+fresh()
+_n = int(time.time())
+tg.update(rl(five=(10, _n + 7200)), _n)
+_LockSpy.n = 0
+tg._Lock.__enter__ = _spy_enter
+try:
+    with envset(TRUEGAUGE_RED_5H="50"):
+        tg._remember(dict(rl(five=(10, _n + 7200)), prompt_cache=pcx), tg.color_config(), _n + 1)
+finally:
+    tg._Lock.__enter__ = _orig_enter
+check("finding 10: both records (settings AND cache), both changed -> ONE lock", _LockSpy.n == 1, _LockSpy.n)
+check("finding 10: ... and both are in the state", state_now()["render_cfg"]["th"]["five_hour"] == 50 and cache_rec()["present"] is True, state_now())
+_before = json.dumps(state_now(), sort_keys=True)
+_LockSpy.n = 0
+tg._Lock.__enter__ = _spy_enter
+try:
+    with envset(TRUEGAUGE_RED_5H="50"):
+        tg._remember(dict(rl(five=(10, _n + 7200)), prompt_cache=pcx), tg.color_config(), _n + 2)
+finally:
+    tg._Lock.__enter__ = _orig_enter
+check("finding 10: nothing changed (inside the 60 s step) -> one lock, nothing written", _LockSpy.n == 1 and json.dumps(state_now(), sort_keys=True) == _before, _LockSpy.n)
+for _what, _kept in (("_cache_apply", "render_cfg"), ("_cfg_apply", "prompt_cache_seen")):
+    fresh()
+    orig = getattr(tg, _what)
+
+    def _boom(*a, **k):
+        raise RuntimeError("probe10")
+    setattr(tg, _what, _boom)
+    try:
+        errs = count_errors(lambda: tg._remember(dict(rl(five=(10, _n + 7200)), prompt_cache=pcx), tg.color_config(), _n))
+    finally:
+        setattr(tg, _what, orig)
+    check("finding 10: %s raises -> the OTHER record (%s) is still written" % (_what, _kept), _kept in state_now(), list(state_now()))
+    check("finding 10: %s raises -> the error is recorded, not raised" % _what, any("probe10" in e for e in errs), errs)
+
+# finding 10 (continued): each part alone is saved; an unchanged call writes nothing; statusline() uses ONE combined call
+fresh()
+_n = int(time.time())
+with envset():
+    tg._remember(dict(rl(five=(10, _n + 7200)), prompt_cache=pcx), tg.color_config(), _n)
+_n2 = _n + 100
+with envset():
+    tg._remember(dict(rl(five=(10, _n + 7200)), prompt_cache=dict(pcx, expires_at=int(_n) + 3300)), tg.color_config(), _n2)
+check("finding 10: only the CACHE changed -> it is saved", cache_rec()["expires_at"] == int(_n) + 3300 and cache_rec()["seen_at"] == _n2, cache_rec())
+with envset(TRUEGAUGE_RED_5H="77"):
+    tg._remember(dict(rl(five=(10, _n + 7200)), prompt_cache=dict(pcx, expires_at=int(_n) + 3300)), tg.color_config(), _n2 + 5)
+check("finding 10: only the SETTINGS changed -> they are saved", state_now()["render_cfg"]["th"]["five_hour"] == 77 and cache_rec()["seen_at"] == _n2, state_now().get("render_cfg"))
+_saves = []
+_orig_save = tg._save
+tg._save = lambda *a, **k: (_saves.append(1), _orig_save(*a, **k))[1]
+try:
+    with envset(TRUEGAUGE_RED_5H="77"):
+        tg._remember(dict(rl(five=(10, _n + 7200)), prompt_cache=dict(pcx, expires_at=int(_n) + 3300)), tg.color_config(), _n2 + 10)
+finally:
+    tg._save = _orig_save
+check("finding 10: nothing changed -> the state file is not written at all", _saves == [], _saves)
+_calls = []
+_o_rem, _o_cfg, _o_cache = tg._remember, tg._remember_render_cfg, tg._remember_cache
+tg._remember = lambda *a, **k: (_calls.append("both"), _o_rem(*a, **k))[1]
+tg._remember_render_cfg = lambda *a, **k: (_calls.append("cfg"), _o_cfg(*a, **k))[1]
+tg._remember_cache = lambda *a, **k: (_calls.append("cache"), _o_cache(*a, **k))[1]
+try:
+    fresh()
+    sl_pc(pcx, time.time())
+finally:
+    tg._remember, tg._remember_render_cfg, tg._remember_cache = _o_rem, _o_cfg, _o_cache
+check("finding 10: one status-line call = ONE combined record call (not two locked passes)", _calls == ["both"], _calls)
+
+# finding 2 / item F: a refused TRUEGAUGE_MARK reaches the error record, once per change
+fresh()
+_n = time.time()
+errs = count_errors(lambda: sl(10, {"TRUEGAUGE_MARK": "brackets"}, _n))
+check("finding 2: a refused TRUEGAUGE_MARK goes into the error record naming the variable and the value",
+      any("TRUEGAUGE_MARK" in e and "brackets" in e for e in errs), errs)
+check("finding 2: ... and it is in the state file (last_error)", "TRUEGAUGE_MARK" in str((state_now().get("last_error") or {}).get("msg")), state_now().get("last_error"))
+errs = count_errors(lambda: sl(10, {"TRUEGAUGE_MARK": "brackets"}, _n + 1))
+check("finding 2: the same refusal again -> not recorded again", not any("TRUEGAUGE_MARK" in e for e in errs), errs)
+check("finding 2: --show names the refusal in the status line's settings", "REFUSED (default used): TRUEGAUGE_MARK=" in cli("--show")[1])
+
+# findings 1, 2, 7, 8, 9 (README text): the claims a reader is told must be there, in both languages
+for _lang, _fn in (("en", "README.md"), ("ru", "README.ru.md")):
+    _txt = open(os.path.join(os.path.dirname(HERE), _fn), encoding="utf-8").read()
+    _i = _txt.find("## Cold cache" if _lang == "en" else "## Остывший кэш")
+    _cold = _txt[_i:] if _i >= 0 else ""
+    _j = _txt.find("## Mark for colour-blind" if _lang == "en" else "## Метка для тех")
+    _mark = _txt[_j:_txt.find("\n## ", _j + 5)] if _j >= 0 else ""
+    check("finding 1 / item A (%s): the cold-cache section says the arrival of prompt_cache is NOT measured, and points at present=True" % _lang,
+          "2.1.293" in _cold[:1500] and "present=True" in _cold[:1500], _cold[:400])
+    check("finding 2 (%s): the Mark section sends a reader whose mark is not visible to --show and names the REFUSED part" % _lang,
+          "--show" in _mark and "status line cold colour" in _mark and "REFUSED (default used): TRUEGAUGE_MARK" in _mark, _mark[-300:])
+    check("finding 7 (%s): the agent step checks success by the `status line ... mark:` line, and gives PowerShell" % _lang,
+          "status line cold colour: ...; mark:" in _txt and "$env:TRUEGAUGE_MARK" in _txt and "AFTER" in _txt.replace("ПОСЛЕ", "AFTER"))
+    check("finding 3-5 (%s): README tells how to read `status line last call` and the session tags" % _lang, "status line last call" in _cold and "accurate to 60 s" in _cold)
+    check("finding 6 / item C (%s): README says expires_at is epoch SECONDS and the unit is an assumption" % _lang, "2100-01-01" in _cold)
+    check("finding 9 (%s): README step 3 sends the agent to project/local settings too" % _lang, "settings.local.json" in _txt)
+    check("finding 8 (%s): the by-hand fragment has no second `env` block, and says to add keys to an existing one" % _lang,
+          '"env": { "TRUEGAUGE_LANG"' not in _txt.split("## Settings" if _lang == "en" else "## Настройки")[0], _lang)
+    check("finding 8 (%s): uninstall of a hand-written line needs --force (stated)" % _lang, "--force" in _txt)
+    check("finding 9 (%s): the 'repaint at expires_at' claim has its source" % _lang, "When the status line updates" in _txt, _lang)
 
 # ---- equivalence with v0.2.0 (kept byte for byte as tests/ref_v0_2_0.py)
 _spec2 = importlib.util.spec_from_file_location("ref_v0_2_0", os.path.join(HERE, "ref_v0_2_0.py"))
