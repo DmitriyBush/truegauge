@@ -683,12 +683,18 @@ def fmt_left(sec, w, days_only=False):
     return "%d%s" % (sec // 60, w["m"])
 
 
-def fmt_tokens(n, w, down=False):
+def fmt_tokens(n, w, down=False, up=False):
     """Unit glued to the number: <1000 -> 812; <999500 -> 548K; else 2.6M (half up, `.` separator).
-    down=True for a lower bound: rounded DOWN, never above the count (`Σ≥2.6M` for 2.65M)."""
+    down=True for a lower bound: rounded DOWN, never above the count (`Σ≥2.6M` for 2.65M).
+    up=True for an upper bound: rounded UP, never below the count (`≤T549K` for 548 200; 999 001 -> 1.0M)."""
     n = max(0, int(n))
     if n < 1000:
         return str(n)
+    if up:
+        if -(-n // 1000) < 1000:
+            return "%d%s" % (-(-n // 1000), w["K"])
+        tenths = -(-n // 100_000)
+        return "%d.%d%s" % (tenths // 10, tenths % 10, w["M"])
     if down:
         if n < 1_000_000:
             return "%d%s" % (n // 1000, w["K"])
@@ -917,9 +923,9 @@ def render(st, tokens, ctx_pct, lang="en", ctx_tokens=None, cold=False, ctx_last
     if ctx_pct is not None and not no_reading:  # a fill with 0 tokens is not from a real reading either
         ctx.append("%d%%" % _half_up(ctx_pct))
     if no_reading and _context_valid(ctx_last):  # the old number is an upper bound: the context only shrank since
-        ctx.append(LE + w["T"] + fmt_tokens(ctx_last["tokens"], w))
+        ctx.append(LE + w["T"] + fmt_tokens(ctx_last["tokens"], w, up=True))
         if ctx_last["pct"] is not None:
-            ctx.append("%s%d%%" % (LE, _half_up(ctx_last["pct"])))
+            ctx.append("%s%d%%" % (LE, math.ceil(ctx_last["pct"])))
     group = " ".join(ctx)
     if group and cold and cc is not None:  # nothing to paint when there is no reading
         try:

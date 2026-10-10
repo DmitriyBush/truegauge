@@ -1,8 +1,10 @@
 """Question: does truegauge ever show an old, void or replayed number as a current one, count a token twice,
 or print a wrong time left at the edges of its thresholds?
 Every case runs in a NEW temporary state dir (the live state is never touched). Run: python tests/test_truegauge.py"""
+import atexit
 import json
 import os
+import shutil
 import sys
 import tempfile
 
@@ -13,6 +15,15 @@ sys.path.insert(0, os.path.dirname(HERE))
 REAL_HOME = os.path.expanduser("~")
 REAL_PROTECTED = [os.path.join(REAL_HOME, ".claude"), os.path.join(REAL_HOME, ".truegauge")]
 ROOT = tempfile.mkdtemp(prefix="tg_test_")
+_OWN_TEMP = [ROOT]  # every temporary folder THIS process makes outside ROOT; removed at exit (also after a crash), by saved path only
+
+
+def _clean_own_temp():
+    for _p in _OWN_TEMP:
+        shutil.rmtree(_p, ignore_errors=True)
+
+
+atexit.register(_clean_own_temp)
 SANDBOX = os.path.join(ROOT, "sandbox_home")
 os.makedirs(os.path.join(SANDBOX, ".claude"))
 # The whole run lives in temporary places: whatever default truegauge computes lands inside ROOT.
@@ -760,6 +771,7 @@ except RuntimeError as e:
 for label, setter in (("settings path", None), ("state dir", "home")):
     d = fresh()
     elsewhere = tempfile.mkdtemp(prefix="tg_outside_")
+    _OWN_TEMP.append(elsewhere)
     home_kept = tg.HOME
     sp = os.path.join(d, "settings.json")
     if setter == "home":
@@ -776,6 +788,7 @@ for label, setter in (("settings path", None), ("state dir", "home")):
     check("fuse is wired into cli(): a %s outside the test root stops the call" % label, wired)
 # a path inside a (fake) 'real' user directory is refused by the real-directory branch, with its own message
 fake_real = tempfile.mkdtemp(prefix="tg_fakereal_")
+_OWN_TEMP.append(fake_real)
 REAL_PROTECTED.append(fake_real)
 try:
     guard_path(os.path.join(fake_real, "settings.json"))
@@ -1823,6 +1836,19 @@ finally:
     tg._remember, tg._remember_render_cfg, tg._remember_cache = _o_rem, _o_cfg, _o_cache
 check("finding 10: one status-line call = ONE combined record call (not two locked passes)", _calls == ["both"], _calls)
 
+# a damaged state file is not overwritten by the cache record, neither by the combined call nor by the cache-only one
+for _what, _call in (("_remember (settings + cache)", lambda n: tg._remember(dict(rl(five=(10, n + 7200)), prompt_cache=pcx), tg.color_config(), n)),
+                     ("_remember_cache", lambda n: tg._remember_cache(dict(rl(five=(10, n + 7200)), prompt_cache=pcx), n))):
+    for _bad in ("{not json", "[1, 2]"):
+        fresh()
+        _n = int(time.time())
+        with open(tg.STATE, "w", encoding="utf-8") as f:
+            f.write(_bad)
+        with envset():
+            _call(_n)
+        check("test_cache_record_damaged_state: %s leaves a damaged state (%r) byte for byte as it was" % (_what, _bad),
+              open(tg.STATE, encoding="utf-8").read() == _bad, open(tg.STATE, encoding="utf-8").read())
+
 # finding 2 / item F: a refused TRUEGAUGE_MARK reaches the error record, once per change
 fresh()
 _n = time.time()
@@ -1857,7 +1883,7 @@ for _lang, _fn in (("en", "README.md"), ("ru", "README.ru.md")):
 
 # ---- T4: the context reading survives /compact and the time before the first reply
 T4_SID, T4_OTHER = "abcd1234-0000-4000-8000-000000000001", "wxyz9876-0000-4000-8000-000000000002"
-T4_STALE = "≤T548K ≤55%"  # what the line draws for a saved T548K 55%
+T4_STALE = "≤T549K ≤56%"  # what the line draws for a saved 548 200 tokens / 55.2%: an upper bound rounds UP
 
 
 def t4_call(tok, pct, now, sid=T4_SID, lang="en", **extra):
@@ -1897,7 +1923,7 @@ def test_state_survives_compaction_same_session():
     out = t4_call(None, None, n + 92)
     check("T4 tokens absent (not 0): no group, the old reading is not drawn", "T548K" not in out and tg.LE not in out, out)
     out = t4_call(0, 0, n + 93, lang="ru")
-    check("T4 Russian letters on the stale group", "≤Т548К ≤55%" in out, out)
+    check("T4 Russian letters on the stale group", "≤Т549К ≤56%" in out, out)
 
 
 def test_state_survives_compaction_other_session():
@@ -1916,7 +1942,7 @@ def test_state_survives_compaction_other_session():
     check("T4 a live reading without a session tag is not kept (it could never be matched)", "context_seen" not in state_now(), state_now().get("context_seen"))
     t4_call(548200, None, n)
     out = t4_call(0, 0, n + 5)
-    check("T4 a reading saved without a percent: the group has the tokens only", out.endswith(tg.LE + "T548K") and "55%" not in out, out)
+    check("T4 a reading saved without a percent: the group has the tokens only", out.endswith(tg.LE + "T549K") and "56%" not in out, out)
 
 
 def test_state_survives_compaction_damaged_record():
@@ -2004,6 +2030,23 @@ def test_state_survives_compaction_show_and_cold():
     check("T4 render: a saved reading is not used when there IS a reading now", tg.render({}, None, 55.2, "en", 548200, False, good) == "T548K 55%", tg.render({}, None, 55.2, "en", 548200, False, good))
     check("T4 render: no reading now + a saved one -> the bound group", tg.render({}, None, 0, "en", 0, False, good) == T4_STALE, tg.render({}, None, 0, "en", 0, False, good))
     check("T4 render: a saved reading with 0 tokens is not drawn", tg.render({}, None, 0, "en", 0, False, dict(good, tokens=0)) == "", tg.render({}, None, 0, "en", 0, False, dict(good, tokens=0)))
+    # the bound sign is honest: the old numbers are rounded UP (never below the saved value); the live reading is unchanged
+    for _tok, _want in ((1, "≤T1"), (999, "≤T999"), (1000, "≤T1K"), (1001, "≤T2K"), (548000, "≤T548K"), (548001, "≤T549K"), (548200, "≤T549K"),
+                        (548999, "≤T549K"), (549000, "≤T549K"), (998999, "≤T999K"), (999000, "≤T999K"), (999001, "≤T1.0M"), (999999, "≤T1.0M"),
+                        (1000000, "≤T1.0M"), (1000001, "≤T1.1M"), (2600000, "≤T2.6M"), (2600001, "≤T2.7M"), (2650000, "≤T2.7M")):
+        _got = tg.render({}, None, 0, "en", 0, False, dict(good, tokens=_tok, pct=None))
+        check("T6 bound sign, tokens %d -> %s" % (_tok, _want), _got == _want, _got)
+    for _pct, _want in ((0.1, "≤1%"), (0.9, "≤1%"), (1.0, "≤1%"), (1.1, "≤2%"), (54.0, "≤54%"), (54.2, "≤55%"), (54.99, "≤55%"),
+                        (55.0, "≤55%"), (55.01, "≤56%"), (99.5, "≤100%"), (100, "≤100%")):
+        _got = tg.render({}, None, 0, "en", 0, False, dict(good, pct=_pct)).split(" ")[1]
+        check("T6 bound sign, percent %s -> %s" % (_pct, _want), _got == _want, _got)
+    check("T6 bound sign, Russian: the tokens go up too", tg.render({}, None, 0, "ru", 0, False, dict(good, tokens=2600001, pct=None)) == "≤Т2.7М")
+    for _tok, _want in ((548000, "T548K"), (548200, "T548K"), (548499, "T548K"), (548500, "T549K"), (999499, "T999K"), (999500, "T1.0M"), (2650000, "T2.7M")):
+        _got = tg.render({}, None, 0, "en", _tok, False, good)
+        check("T6 live reading unchanged, tokens %d -> %s" % (_tok, _want), _got.split(" ")[0] == _want, _got)
+    for _pct, _want in ((54.2, "54%"), (54.5, "55%"), (0.4, "0%")):
+        _got = tg.render({}, None, _pct, "en", 548200, False, good)
+        check("T6 live reading unchanged, percent %s -> %s" % (_pct, _want), _got.split(" ")[1] == _want, _got)
 
 
 test_state_survives_compaction_same_session()

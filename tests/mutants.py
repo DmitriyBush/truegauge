@@ -254,6 +254,14 @@ MUTANTS = [
     ('FUSE: outside-root branch removed', '    if not _inside(p, ROOT):', '    if False:', "test"),
     ('FUSE: not called on the settings path', '        guard_path(tg._settings_path(list(args)))', '        pass', "test"),
     ('FUSE: not called on the state dir', '    guard_path(tg.HOME)', '    pass', "test"),
+    ("bound sign: tokens rounded down", 'fmt_tokens(ctx_last["tokens"], w, up=True)', 'fmt_tokens(ctx_last["tokens"], w, down=True)'),
+    ("bound sign: tokens rounded half up like the live one", 'fmt_tokens(ctx_last["tokens"], w, up=True)', 'fmt_tokens(ctx_last["tokens"], w)'),
+    ("bound sign: percent rounded down", 'math.ceil(ctx_last["pct"])', 'math.floor(ctx_last["pct"])'),
+    ("bound sign: percent rounded half up like the live one", 'math.ceil(ctx_last["pct"])', '_half_up(ctx_last["pct"])'),
+    ("bound sign: up-rounding shows 1000K instead of 1.0M", 'if -(-n // 1000) < 1000:', 'if n < 999_500:'),
+    ("bound sign: up-rounding of millions goes down", 'tenths = -(-n // 100_000)', 'tenths = n // 100_000'),
+    ("live reading: tokens became rounded up", '        ctx.append(w["T"] + fmt_tokens(ct, w))', '        ctx.append(w["T"] + fmt_tokens(ct, w, up=True))'),
+    ("live reading: percent became rounded up", '        ctx.append("%d%%" % _half_up(ctx_pct))', '        ctx.append("%d%%" % math.ceil(ctx_pct))'),
 ]
 
 src = open(SRC, encoding="utf-8").read()
@@ -272,6 +280,13 @@ def run_one(m):
     if base.count(old) != 1:
         return "BLIND  ", "%s (pattern found %d times -- mutant not applied)" % (name, base.count(old))
     d = tempfile.mkdtemp(prefix="tg_mut_")
+    try:
+        return _run_in(d, m, name, old, new, on_test)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)  # only the folder made just above, by its saved path
+
+
+def _run_in(d, m, name, old, new, on_test):
     os.makedirs(os.path.join(d, "tests"))
     for ref in glob.glob(os.path.join(HERE, "ref_*.py")):  # the suite loads its reference modules from its own folder
         shutil.copy(ref, os.path.join(d, "tests"))
