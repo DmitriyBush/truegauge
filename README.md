@@ -115,7 +115,7 @@ and `--uninstall --force` removes the key.
 | `TRUEGAUGE_RED_7D` | `99` | red threshold of the weekly window |
 | `TRUEGAUGE_RED_COLOR` | `#ff0000` | `#rrggbb` or `ansi` |
 | `TRUEGAUGE_COLD_COLOR` | `#ffaf00` | colour of the context group when the cache is cold: `#rrggbb`, `ansi` or `off` (see Cold cache) |
-| `TRUEGAUGE_MARK` | `off` | `underline`, `brackets`, `both` or `off`: a mark without colour (see Colour-blind friendly mark) |
+| `TRUEGAUGE_MARK` | `off` | a list of `underline`, `braces`, `bold`, or `all`, or `off`: a mark without colour (see Mark for colour-blind users; steps for an AI agent follow it) |
 | `NO_COLOR` | unset | any non-empty value: no colour |
 
 ## Colors
@@ -198,33 +198,123 @@ price, so this is the moment to think before sending a long-context message.
   not run since this version was installed; `present=False` means Claude Code did not send the object (then amber
   never appears, by the rule above). The arrival of `prompt_cache` on a given install is not asserted by the tests.
 
-## Colour-blind friendly mark
+## Mark for colour-blind users (underline, braces, bold)
 
-For people who do not tell the colours apart there is a mark that needs no colour. **It is off by default.**
-`TRUEGAUGE_MARK` (any case, spaces around are ignored):
+If you do not tell the colours apart there is a mark that needs no colour. **It is off by default.** Nothing changes
+on your line until you switch it on.
 
-| Value | What it does |
-|---|---|
-| `off` (or empty, unset) | no mark |
-| `underline` | the group is underlined (`ESC[4m` ... `ESC[24m`, which switches off only the underline) |
-| `brackets` | the group is put in square brackets: `[4h 98%]`, `[T548K 55%]` (a terminal draws no frame around text, brackets are text and show everywhere) |
-| `both` | brackets inside the underline: `[4h 98%]` underlined |
+**What it is put on.** Exactly the groups that get a colour, under the same conditions: a window group at or above
+its red threshold (`4h 98%`) and the context group when the cache is cold (`T548K 55%`). `Σ` and Fable never get a
+mark. It does not depend on colour: with `NO_COLOR` set or `TRUEGAUGE_COLD_COLOR=off` the mark is still drawn (that
+is who it is for). A threshold set to `off` is "no condition", so no mark either. When nothing is past a threshold
+and the cache is warm, the line is byte for byte the same as without the setting.
 
-Any other value is refused: no mark, and `--show` names the refusal.
+**What you can choose.** `TRUEGAUGE_MARK` is a **list** of elements separated by commas, or `all`, or `off`:
 
-The mark goes on exactly the groups that get a colour, under the same conditions: a window group at or above its red
-threshold, and the context group when the cache is cold. It does not depend on colour: with `NO_COLOR` set or
-`TRUEGAUGE_COLD_COLOR=off` the mark is still drawn (that is who it is for). A threshold set to `off` means no
-condition, so no mark. `Σ` and Fable never get one.
+| Element | What it does | Looks like |
+|---|---|---|
+| `underline` | the group is underlined (`ESC[4m` ... `ESC[24m`; the end switches off only the underline) | <u>4h 98%</u> |
+| `braces` | the group is put in curly braces (square brackets blend into the text, so they were rejected) | `{4h 98%}`, `{T548K 55%}` |
+| `bold` | the group is bold. **With colour on it adds nothing visible**: the red and amber sequences are already bold, and truegauge does not add the bold a second time. Without colour (`NO_COLOR`, colour `off`) the group gets its own `ESC[1m` ... `ESC[22m` | **4h 98%** |
+| `all` | the same as `underline,braces,bold` | `{4h 98%}`, underlined and bold |
+| `off` (or empty, or unset) | no mark | `4h 98%` |
 
-Put it in the `env` block of `~/.claude/settings.json`:
+Rules for the list: any case, spaces around an element are ignored, order does not matter, a repeat (`bold,bold`) is
+harmless. **One unknown element refuses the whole setting**: no mark at all (nothing is switched on halfway), and
+`--show` names the element. The words of the first 0.3 draft, `brackets` and `both`, are not valid any more.
 
-```json
-{ "env": { "TRUEGAUGE_MARK": "both" } }
+Example, a line with the 5-hour window past its threshold and a cold cache (`ESC` sequences are invisible; this is
+the text you see):
+
+```
+no mark              4h 98% 3d 54% T548K 55% Σ2.6M
+braces               {4h 98%} 3d 54% {T548K 55%} Σ2.6M
+underline            4h 98% 3d 54% T548K 55% Σ2.6M      (the two marked groups are underlined)
+all                  {4h 98%} 3d 54% {T548K 55%} Σ2.6M  (underlined and bold as well)
 ```
 
-`python truegauge.py --show` prints `mark: ...` (this shell) and the setting the status line itself last used. How the
-underline looks inside Claude Code's status line has to be checked by eye; the tests check the characters only.
+**Do the curly braces affect anything?** No. Nobody parses the status line: Claude Code only prints it into the
+terminal, where `{` and `}` are ordinary characters (truegauge itself never reads its line back; if you pipe the
+line through some other tool of your own, that tool is the only place braces could matter, and we cannot see it). Inside truegauge the text of a group is joined with `+`, never used as a format template, so
+`{`, `}` and `%` in the text cannot break the line (the tests feed groups with braces, `%`, `≥` and Cyrillic).
+
+**Switch it on.** Add it to the `env` block of `~/.claude/settings.json`:
+
+```json
+{ "env": { "TRUEGAUGE_MARK": "all" } }
+```
+
+(or any list, for example `"underline,braces"`). **Switch it off:** delete the key, or set it to `"off"`.
+**Check:** `python truegauge.py --show` prints `mark: ...` for your shell and `status line ... mark: ...` for the
+setting the status line itself used last (it appears after the line has run once with the new setting). A refused
+value shows up in the `REFUSED` line. How underline and bold look inside Claude Code's status line has to be checked
+by eye; the tests check the characters only. To see the mark at once without waiting for 98%, set
+`TRUEGAUGE_RED_5H` to `1` for a minute and put it back.
+
+## For an AI agent: set it up without the human
+
+Do these steps in order; stop at the first one that fails and tell the human what you saw. Nothing here needs a
+restart of your own process.
+
+1. **Find the settings file.** `$CLAUDE_CONFIG_DIR/settings.json` if that variable is set, otherwise
+   `~/.claude/settings.json` (Windows: `C:/Users/<name>/.claude/settings.json`). If the file does not exist or is not
+   valid JSON, **stop**: do not create or rewrite it, ask the human.
+2. **Make a copy first**: `settings.json.bak-<date>` next to it.
+3. **Read, add the key, write back; never replace the block.** The `env` object may already hold other keys; they
+   must survive. If `env` exists and is not an object, stop. A ready snippet (change the two lines `KEY`/`VALUE`):
+
+   ```python
+   import json, os, shutil, time
+   KEY, VALUE = "TRUEGAUGE_MARK", "all"
+   path = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"), "settings.json")
+   with open(path, encoding="utf-8") as f:
+       data = json.load(f)                      # invalid JSON raises: stop here, write nothing
+   shutil.copy2(path, path + ".bak-" + time.strftime("%Y%m%d%H%M%S"))
+   env = data.setdefault("env", {})
+   assert isinstance(env, dict), "env is not an object"
+   env[KEY] = VALUE                             # other keys of env stay untouched
+   with open(path, "w", encoding="utf-8") as f:
+       json.dump(data, f, indent=2, ensure_ascii=False)
+   ```
+
+   The file is rewritten with 2-space indentation; keys keep their order; comments are not allowed in JSON, so there
+   is nothing to lose (if the file had any, step 1 already stopped you).
+4. **Values, verbatim.** `TRUEGAUGE_MARK`: `underline`, `braces`, `bold`, any comma list of them (`"underline,braces"`),
+   `all`, `off`. Examples of ready fragments for the `env` block:
+
+   ```json
+   { "env": { "TRUEGAUGE_MARK": "all" } }
+   { "env": { "TRUEGAUGE_MARK": "underline,braces" } }
+   { "env": { "TRUEGAUGE_MARK": "bold" } }
+   { "env": { "TRUEGAUGE_MARK": "braces", "TRUEGAUGE_COLD_COLOR": "ansi", "TRUEGAUGE_RED_5H": "95" } }
+   ```
+
+   Use the last form's idea for several settings at once: all keys go into the same `env` object.
+5. **Check.** `python truegauge.py --show` (run it with the same settings in your shell if you want to see the
+   verdict at once: `TRUEGAUGE_MARK=all python truegauge.py --show`). Look for `mark: underline,braces,bold` and
+   that no `REFUSED (default used)` line mentions the variable. The line `status line ... mark: ...` shows what the
+   running status line used; it is updated when the line is redrawn.
+6. **When it takes effect.** The status line reads its settings at every redraw, so the change should show at the next
+   redraw. Whether Claude Code re-reads `settings.json` `env` without a restart is **not measured**: if the
+   `status line ... mark:` line still shows the old value after a few redraws, ask the human to restart Claude Code.
+7. **Roll back.** Delete the key from `env` (or restore the `.bak-...` copy). An empty value (`""`) also means "not
+   set".
+
+### All settings of the line
+
+Each one goes into the same `env` block (or the shell, before starting Claude Code). An empty value means "not set"
+for all of them. A wrong value of a threshold, a colour or the mark is refused: the default is used and `--show`
+names the refusal (`TRUEGAUGE_LANG` and `NO_COLOR` are not checked that way, see their rows).
+
+| Name | Values | Default | What it changes |
+|---|---|---|---|
+| `TRUEGAUGE_MARK` | list of `underline`, `braces`, `bold`; or `all`; or `off` | `off` | a mark that needs no colour on the groups that get a colour (see above); one unknown element refuses all |
+| `TRUEGAUGE_COLD_COLOR` | `#rrggbb`, `ansi`, `off` / `0` | `#ffaf00` | colour of the context group (`T548K 55%`) when the main session's cache is cold |
+| `TRUEGAUGE_RED_5H` | integer 1..100, `off` / `0` | `98` | percent at which the 5-hour group turns red (`off`: never) |
+| `TRUEGAUGE_RED_7D` | integer 1..100, `off` / `0` | `99` | the same for the weekly group |
+| `TRUEGAUGE_RED_COLOR` | `#rrggbb`, `ansi` | `#ff0000` | colour of the red window groups |
+| `NO_COLOR` | any non-empty value | unset | no colour at all (a mark, if set, stays) |
+| `TRUEGAUGE_LANG` | `en`, `ru` | `en` | unit letters: Cyrillic (`Т К М`) for `ru`; any other value silently gives English |
 
 ## Check it
 
