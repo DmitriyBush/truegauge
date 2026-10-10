@@ -664,6 +664,7 @@ WORDS = {
     "ru": {"d": "d", "h": "h", "m": "m", "T": "Т", "K": "К", "M": "М"},
 }
 GE = "≥"
+LE = "≤"  # the context group drawn from an old reading: after /compact the context only gets smaller
 SIGMA = "Σ"
 
 
@@ -879,10 +880,11 @@ def _decorate(group, paint, mark):
     return group
 
 
-def render(st, tokens, ctx_pct, lang="en", ctx_tokens=None, cold=False):
+def render(st, tokens, ctx_pct, lang="en", ctx_tokens=None, cold=False, ctx_last=None):
     """`4h 38% 3d 54% F4% T548K 55% Σ2.6M`: 5-hour window, week, Fable, tokens in the window now, context fill,
     session total. A group whose data is unknown is left out, never shown as 0. cold: the main session's cache has
-    gone cold (see _cache_cold) -- the context group is drawn amber."""
+    gone cold (see _cache_cold) -- the context group is drawn amber. ctx_last: the saved reading of THIS session (see
+    _stale_context); used only when Claude Code sends no reading now, drawn with `<=` (an upper bound)."""
     w = WORDS.get(lang, WORDS["en"])
     try:
         cc = color_config()
@@ -914,6 +916,10 @@ def render(st, tokens, ctx_pct, lang="en", ctx_tokens=None, cold=False):
         ctx.append(w["T"] + fmt_tokens(ct, w))
     if ctx_pct is not None and not no_reading:  # a fill with 0 tokens is not from a real reading either
         ctx.append("%d%%" % _half_up(ctx_pct))
+    if no_reading and _context_valid(ctx_last):  # the old number is an upper bound: the context only shrank since
+        ctx.append(LE + w["T"] + fmt_tokens(ctx_last["tokens"], w))
+        if ctx_last["pct"] is not None:
+            ctx.append("%s%d%%" % (LE, _half_up(ctx_last["pct"])))
     group = " ".join(ctx)
     if group and cold and cc is not None:  # nothing to paint when there is no reading
         try:
@@ -1020,6 +1026,59 @@ def _remember_cache(payload, now):
             _save(d)
 
 
+def _context_valid(rec):
+    """The saved context reading has the expected shape: tokens a number > 0, pct a number or None, sid a text, at a
+    number, stale_since absent / None / a number. Anything else is "no reading"."""
+    return (isinstance(rec, dict) and _num(rec.get("tokens")) is not None and rec["tokens"] > 0
+            and (rec.get("pct") is None or _num(rec.get("pct")) is not None)
+            and isinstance(rec.get("sid"), str) and bool(rec["sid"]) and _num(rec.get("at")) is not None
+            and (rec.get("stale_since") is None or _num(rec.get("stale_since")) is not None))
+
+
+def _context_apply(d, payload, now):
+    """Keep the LAST real context reading (tokens > 0) of a session: {tokens, pct, sid, at[, stale_since]}. Written only
+    when the reading CHANGED (tokens, pct or session; `at` is the time of that change). A call with no reading (0 tokens,
+    before the first reply and after /compact) of the SAME session sets `stale_since` once, when the line starts to draw
+    the old reading as an upper bound. A payload without a usable session tag is not kept: it could never be matched.
+    -> True when `d` was modified."""
+    cw = payload.get("context_window") if isinstance(payload, dict) else None
+    if not isinstance(cw, dict):
+        return False
+    sid = _sid8(payload)
+    tok = _num(cw.get("total_input_tokens"))
+    if sid is None or tok is None:
+        return False
+    old = d.get("context_seen")
+    if tok > 0:
+        rec = {"tokens": tok, "pct": _num(cw.get("used_percentage")), "sid": sid}
+        if _context_valid(old) and old.get("stale_since") is None and _same({k: old[k] for k in rec}, rec):
+            return False
+        d["context_seen"] = dict(rec, at=int(now))
+        return True
+    if _context_valid(old) and old["sid"] == sid and old.get("stale_since") is None:
+        d["context_seen"] = dict(old, stale_since=int(now))
+        return True
+    return False
+
+
+def _stale_context(sid):
+    """The saved reading when it is this session's and well-formed, else None. A damaged record is "no reading" and is
+    recorded as an error once (the same text is not written again while it stands: the line runs often)."""
+    d, problem = _read()
+    if problem not in (None, "missing"):
+        return None
+    rec = d.get("context_seen")
+    if rec is None:
+        return None
+    if not _context_valid(rec):
+        msg = "context record: damaged, treated as no reading"
+        le = d.get("last_error")
+        if not (isinstance(le, dict) and le.get("msg") == msg):
+            _record_error(msg)
+        return None
+    return rec if sid is not None and rec["sid"] == sid else None
+
+
 def _remember(payload, cc, now):
     """What the status line keeps in the state file on EVERY call: its colour settings and the last prompt_cache.
     ONE lock, one read, one write (a new writer on every reply must not triple the lock traffic). The two parts are
@@ -1042,6 +1101,10 @@ def _remember(payload, cc, now):
             changed = _cache_apply(d, payload, now) or changed
         except Exception as e:  # an extra (the measuring instrument); its failure must not cost the main line
             errs.append("cache record: %s: %s" % (type(e).__name__, e))
+        try:
+            changed = _context_apply(d, payload, now) or changed
+        except Exception as e:  # an extra; its failure costs the old context reading, never the line
+            errs.append("context record: %s: %s" % (type(e).__name__, e))
         if changed:
             _save(d)
     for e in errs:
@@ -1093,7 +1156,13 @@ def statusline(payload, now=None):
     cw = payload.get("context_window")
     ctx = _num(cw.get("used_percentage")) if isinstance(cw, dict) else None
     cti = _num(cw.get("total_input_tokens")) if isinstance(cw, dict) else None
-    return render(st, tokens, ctx, os.environ.get("TRUEGAUGE_LANG", "en"), cti, cold)
+    last = None
+    if cti is not None and cti <= 0:  # no reading now: the same session's saved one may be drawn as an upper bound
+        try:
+            last = _stale_context(_sid8(payload))
+        except Exception as e:  # SF4 context record: no group, the line stays
+            _record_error("context record: %s: %s" % (type(e).__name__, e))
+    return render(st, tokens, ctx, os.environ.get("TRUEGAUGE_LANG", "en"), cti, cold, last)
 
 
 def _th_name(n):
@@ -1147,6 +1216,27 @@ def _show_cache(d, now=None):
               % (_fmt_time(run["at"]), RUN_EVERY_S, run.get("sid") or "?", at))
 
 
+def _fmt_ctx(rec):
+    """`T548K 55%` (the percent left out when it was not sent), numbers as the line draws them."""
+    w = WORDS["en"]
+    return " ".join([w["T"] + fmt_tokens(rec["tokens"], w)] + (["%d%%" % _half_up(rec["pct"])] if rec["pct"] is not None else []))
+
+
+def _show_context(d):
+    """The `context:` line: whether the status line draws the context group from a live reading or from an old one
+    (stale_since is set by the line itself at the first call without a reading)."""
+    rec = d.get("context_seen")
+    if rec is None:
+        print("context: no reading")
+    elif not _context_valid(rec):
+        print("context: no reading (the saved record is damaged; the status line rewrites it with its next real reading)")
+    elif rec.get("stale_since") is None:
+        print("context: live")
+    else:
+        print("context: last reading %s (session %s) at %s; stale since %s"
+              % (_fmt_ctx(rec), rec["sid"], _fmt_time(rec["at"]), _fmt_time(rec["stale_since"])))
+
+
 def show():
     st = read_state()
     t = st["_tap"]
@@ -1179,6 +1269,7 @@ def show():
         print("status line cold colour: %s; mark: %s"
               % ("off" if rc.get("cold_sgr") is None else rc["cold_sgr"].replace("\033", "ESC"), rc["mark"]))
     _show_cache(d)
+    _show_context(d)
     judge = rc  # the status line's own settings: the shell's differ whenever `env` in settings.json is used
     for key in WINDOWS + ("fable",):
         v = st.get(key)

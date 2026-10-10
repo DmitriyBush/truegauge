@@ -1855,6 +1855,163 @@ for _lang, _fn in (("en", "README.md"), ("ru", "README.ru.md")):
     check("finding 8 (%s): uninstall of a hand-written line needs --force (stated)" % _lang, "--force" in _txt)
     check("finding 9 (%s): the 'repaint at expires_at' claim has its source" % _lang, "When the status line updates" in _txt, _lang)
 
+# ---- T4: the context reading survives /compact and the time before the first reply
+T4_SID, T4_OTHER = "abcd1234-0000-4000-8000-000000000001", "wxyz9876-0000-4000-8000-000000000002"
+T4_STALE = "≤T548K ≤55%"  # what the line draws for a saved T548K 55%
+
+
+def t4_call(tok, pct, now, sid=T4_SID, lang="en", **extra):
+    cw = {"used_percentage": pct, "total_input_tokens": tok}
+    pl = rl(five=(10, int(now) + 7200), context_window=cw, **extra)
+    if sid is not ABSENT:
+        pl["session_id"] = sid
+    old_lang = os.environ.get("TRUEGAUGE_LANG")  # envset restores the colour variables only
+    os.environ["TRUEGAUGE_LANG"] = lang
+    try:
+        with envset():
+            return tg.statusline(pl, now)
+    finally:
+        if old_lang is None:
+            os.environ.pop("TRUEGAUGE_LANG", None)
+        else:
+            os.environ["TRUEGAUGE_LANG"] = old_lang
+
+
+def test_state_survives_compaction_same_session():
+    fresh()
+    n = int(time.time())
+    out = t4_call(548200, 55.2, n)
+    check("T4 live reading: the group is drawn as before, without a bound sign", "T548K 55%" in out and tg.LE not in out, out)
+    rec = state_now().get("context_seen")
+    check("T4 live reading: tokens, percent, session tag (8 characters) and time are saved",
+          rec == {"tokens": 548200, "pct": 55.2, "sid": "abcd1234", "at": n}, rec)
+    out = t4_call(0, 0, n + 30)
+    check("T4 compaction (0 tokens), same session: the old numbers with <= before each", T4_STALE in out, out)
+    check("T4 compaction: the sign is U+2264 and 0 is never shown", tg.LE == chr(0x2264) and "T0" not in out and " 0%" not in out, out)
+    check("T4 compaction: the saved record got stale_since once", state_now()["context_seen"].get("stale_since") == n + 30, state_now().get("context_seen"))
+    out = t4_call(0, 0, n + 90)
+    check("T4 a second call without a reading: the same group, stale_since not moved",
+          T4_STALE in out and state_now()["context_seen"]["stale_since"] == n + 30, out)
+    out = t4_call(0, None, n + 91)
+    check("T4 before the first reply, percent not sent either: still the saved group", T4_STALE in out, out)
+    out = t4_call(None, None, n + 92)
+    check("T4 tokens absent (not 0): no group, the old reading is not drawn", "T548K" not in out and tg.LE not in out, out)
+    out = t4_call(0, 0, n + 93, lang="ru")
+    check("T4 Russian letters on the stale group", "≤Т548К ≤55%" in out, out)
+
+
+def test_state_survives_compaction_other_session():
+    fresh()
+    n = int(time.time())
+    t4_call(548200, 55.2, n)
+    out = t4_call(0, 0, n + 30, sid=T4_OTHER)
+    check("T4 other session: no context group, no bound sign", "T548K" not in out and tg.LE not in out and "55%" not in out, out)
+    check("T4 other session: its call does not mark the saved reading stale", state_now()["context_seen"].get("stale_since") is None, state_now().get("context_seen"))
+    out = t4_call(0, 0, n + 31, sid=ABSENT)
+    check("T4 no session tag in the payload: no group", "T548K" not in out and tg.LE not in out, out)
+    fresh()
+    out = t4_call(0, 0, time.time())
+    check("T4 no saved reading at all: no group", "T548K" not in out and tg.LE not in out and " 0%" not in out, out)
+    t4_call(548200, 55.2, n, sid=ABSENT)
+    check("T4 a live reading without a session tag is not kept (it could never be matched)", "context_seen" not in state_now(), state_now().get("context_seen"))
+    t4_call(548200, None, n)
+    out = t4_call(0, 0, n + 5)
+    check("T4 a reading saved without a percent: the group has the tokens only", out.endswith(tg.LE + "T548K") and "55%" not in out, out)
+
+
+def test_state_survives_compaction_damaged_record():
+    for what, bad in (("a string", "T548K"), ("a list", [1]), ("tokens a text", {"tokens": "548200", "pct": 55, "sid": "abcd1234", "at": 5}),
+                      ("tokens 0", {"tokens": 0, "pct": 55, "sid": "abcd1234", "at": 5}),
+                      ("tokens true", {"tokens": True, "pct": 55, "sid": "abcd1234", "at": 5}),
+                      ("tokens negative", {"tokens": -5, "pct": 55, "sid": "abcd1234", "at": 5}),
+                      ("percent a text", {"tokens": 548200, "pct": "55", "sid": "abcd1234", "at": 5}),
+                      ("session not a text", {"tokens": 548200, "pct": 55, "sid": 5, "at": 5}),
+                      ("session empty", {"tokens": 548200, "pct": 55, "sid": "", "at": 5}),
+                      ("no time", {"tokens": 548200, "pct": 55, "sid": "abcd1234"}),
+                      ("stale_since a text", {"tokens": 548200, "pct": 55, "sid": "abcd1234", "at": 5, "stale_since": "x"})):
+        fresh()
+        n = time.time()
+        d = state_now()
+        d["context_seen"] = bad
+        tg._save(d)
+        errs = count_errors(lambda: t4_call(0, 0, n))
+        out = t4_call(0, 0, n + 1)
+        check("T4 damaged record (%s): no group and no 0, the line stays" % what, "T548K" not in out and tg.LE not in out and " 0%" not in out and "10%" in out, out)
+        check("T4 damaged record (%s): one error line naming the context record" % what, any("context record" in e for e in errs), errs)
+        errs2 = count_errors(lambda: t4_call(0, 0, n + 2))
+        check("T4 damaged record (%s): the same error is not written again on the next call" % what, not any("context record" in e for e in errs2), errs2)
+        out = t4_call(548200, 55.2, n + 3)
+        check("T4 damaged record (%s): the next real reading rewrites it" % what, state_now()["context_seen"]["tokens"] == 548200 and "T548K 55%" in out, state_now().get("context_seen"))
+
+
+def test_state_survives_compaction_not_rewritten():
+    fresh()
+    n = int(time.time())
+    cw = {"used_percentage": 55.2, "total_input_tokens": 548200}
+    pl = rl(five=(10, n + 7200), context_window=cw, session_id=T4_SID)
+    with envset():
+        tg._remember(pl, tg.color_config(), n)
+    saves = []
+    orig = tg._save
+    tg._save = lambda *a, **k: (saves.append(1), orig(*a, **k))[1]
+    try:
+        with envset():
+            tg._remember(pl, tg.color_config(), n + 5)
+    finally:
+        tg._save = orig
+    check("T4 an unchanged reading: the state file is not written at all", saves == [], saves)
+    t4_call(548200, 55.2, n + 50)
+    check("T4 an unchanged reading through the status line: `at` stays the time of the change", state_now()["context_seen"]["at"] == n, state_now().get("context_seen"))
+    t4_call(549000, 55.2, n + 100)
+    check("T4 a changed token count: rewritten, `at` is the new time", state_now()["context_seen"]["at"] == n + 100 and state_now()["context_seen"]["tokens"] == 549000, state_now().get("context_seen"))
+    t4_call(549000, 56.0, n + 200)
+    check("T4 a changed percent alone: rewritten", state_now()["context_seen"]["at"] == n + 200 and state_now()["context_seen"]["pct"] == 56.0, state_now().get("context_seen"))
+    t4_call(549000, 56.0, n + 300, sid=T4_OTHER)
+    check("T4 the same numbers from another session: rewritten with its tag", state_now()["context_seen"]["sid"] == "wxyz9876" and state_now()["context_seen"]["at"] == n + 300, state_now().get("context_seen"))
+
+
+def test_state_survives_compaction_show_and_cold():
+    fresh()
+    n = int(time.time())
+    check("T4 --show with no reading: `context: no reading`", "context: no reading" in cli("--show")[1], cli("--show")[1])
+    t4_call(548200, 55.2, n)
+    check("T4 --show with a live reading: `context: live`", "context: live" in cli("--show")[1], cli("--show")[1])
+    t4_call(0, 0, n + 40)
+    shown = cli("--show")[1]
+    check("T4 --show when the line draws the old reading: numbers, session, both times",
+          "context: last reading T548K 55%% (session abcd1234) at %s; stale since %s" % (tg._fmt_time(n), tg._fmt_time(n + 40)) in shown, shown)
+    t4_call(548200, 55.2, n + 80)
+    check("T4 --show after a live reading again (the SAME numbers): back to `context: live`", "context: live" in cli("--show")[1] and "stale since" not in cli("--show")[1], cli("--show")[1])
+    d = state_now()
+    d["context_seen"] = {"tokens": "x"}
+    tg._save(d)
+    shown = cli("--show")[1]
+    check("T4 --show with a damaged record: `context: no reading` and the command does not fail", "context: no reading" in shown and cli("--show")[0] == 0, shown)
+    # cold cache: the group is painted the same way as a live one
+    fresh()
+    t4_call(548200, 55.2, n)
+    out = t4_call(0, 0, n + 10, prompt_cache={"caching_observed": True, "warm": False})
+    check("T4 the stale group is painted amber when the cache is cold", amber(T4_STALE) in out, out)
+    out = t4_call(0, 0, n + 11, prompt_cache={"caching_observed": True, "warm": True, "expires_at": n + 3000})
+    check("T4 the stale group is plain when the cache is warm", amber(T4_STALE) not in out and T4_STALE in out, out)
+    with envset(TRUEGAUGE_MARK="braces"):
+        pl = rl(five=(10, int(n) + 7200), context_window={"used_percentage": 0, "total_input_tokens": 0}, session_id=T4_SID,
+                prompt_cache={"caching_observed": True, "warm": False})
+        out = tg.statusline(pl, n + 12)
+    check("T4 the mark (braces) goes around the cold stale group like around a cold live one", "{" + T4_STALE + "}" in SGR_RX.sub("", out), out)
+    # render() on its own: a bad ctx_last never draws, and a live reading wins over a saved one
+    good = {"tokens": 548200, "pct": 55.2, "sid": "abcd1234", "at": 5}
+    check("T4 render: a saved reading is not used when there IS a reading now", tg.render({}, None, 55.2, "en", 548200, False, good) == "T548K 55%", tg.render({}, None, 55.2, "en", 548200, False, good))
+    check("T4 render: no reading now + a saved one -> the bound group", tg.render({}, None, 0, "en", 0, False, good) == T4_STALE, tg.render({}, None, 0, "en", 0, False, good))
+    check("T4 render: a saved reading with 0 tokens is not drawn", tg.render({}, None, 0, "en", 0, False, dict(good, tokens=0)) == "", tg.render({}, None, 0, "en", 0, False, dict(good, tokens=0)))
+
+
+test_state_survives_compaction_same_session()
+test_state_survives_compaction_other_session()
+test_state_survives_compaction_damaged_record()
+test_state_survives_compaction_not_rewritten()
+test_state_survives_compaction_show_and_cold()
+
 # ---- equivalence with v0.2.0 (kept byte for byte as tests/ref_v0_2_0.py)
 _spec2 = importlib.util.spec_from_file_location("ref_v0_2_0", os.path.join(HERE, "ref_v0_2_0.py"))
 ref2 = importlib.util.module_from_spec(_spec2)
