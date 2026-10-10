@@ -88,7 +88,7 @@ MUTANTS = [
     ("red: ageing changes the colour (colour from the shown floor)", '_pct_int(v["used_percentage"]) >= threshold',
      '_pct_int(v["used_percentage"], floor=v.get("status") != "fresh") >= threshold'),
     ("red: reset is a full reset 0m", r'RED_RESET = "\033[22;39m"', r'RED_RESET = "\033[0m"'),
-    ("red: no reset after the group (shared with the amber one)", "        group = paint + group + RED_RESET", "        group = paint + group"),
+    ("red: no reset after the group (shared with the amber one)", "        return paint + group + RED_RESET", "        return paint + group"),
     ("red: NO_COLOR ignored", '"no_color": bool(env.get("NO_COLOR"))', '"no_color": False'),
     ("red: empty NO_COLOR counts as set", '"no_color": bool(env.get("NO_COLOR"))', '"no_color": "NO_COLOR" in env'),
     ("red: empty threshold is a refusal, not 'unset'", '    if not s:\n        return default, None\n    if s.lower() == "off"',
