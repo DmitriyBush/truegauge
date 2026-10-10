@@ -35,9 +35,10 @@ the wrong type, means "not cold" (no data is never shown as cold). On a subscrip
 session (`Σ`, subagents included) is NOT coloured: the cache state is known for the main session only.
 TRUEGAUGE_COLD_COLOR: `#rrggbb` (default #ffaf00), `ansi` (bold yellow of your theme) or `off`. The status line also
 keeps the last `prompt_cache` it saw in the state file; `--show` prints it (`cache: ...`).
-Mark without colour (0.3, for people who do not tell colours apart; OFF by default): TRUEGAUGE_MARK = `underline`,
-`brackets` (`[T548K 55%]`) or `both`; `off` / unset = no mark. It is put on the same groups under the same conditions
-as the colours (red window groups, cold context group) and does not depend on colour: NO_COLOR does not remove it.
+Mark without colour (0.3, for people who do not tell colours apart; OFF by default): TRUEGAUGE_MARK = a comma-separated list of
+`underline`, `braces` (`{T548K 55%}`) and `bold`, or `all` (all three), or `off` / unset = no mark. One unknown item
+refuses the whole setting (off; `--show` names the item). It is put on the same groups under the same conditions as
+the colours (red window groups, cold context group) and does not depend on colour: NO_COLOR does not remove it.
 
 Honesty rules (the reason this tool exists):
   * A session left idle re-sends its LAST reading. Per window the reading with the larger
@@ -714,8 +715,9 @@ RED_ANSI = "\033[1;31m"
 RED_DEFAULT_RGB = "#ff0000"
 COLD_DEFAULT_RGB = "#ffaf00"  # amber: the context group when the main session's prompt cache is cold (0.3)
 COLD_ANSI = "\033[1;33m"
-MARKS = ("off", "underline", "brackets", "both")  # TRUEGAUGE_MARK (0.3): a mark that does not need colour
+MARK_ITEMS = ("underline", "braces", "bold")  # TRUEGAUGE_MARK (0.3): marks that do not need colour; canonical order
 UL_ON, UL_OFF = "\033[4m", "\033[24m"  # underline on / off (off touches nothing else)
+BOLD_ON, BOLD_OFF = "\033[1m", "\033[22m"  # bold on / off (off touches nothing else)
 
 
 def _threshold(raw, default):
@@ -762,13 +764,26 @@ def _cold_sgr(raw):
 
 
 def _mark(raw):
-    """-> (mark, refusal | None) for TRUEGAUGE_MARK. Unset or empty = off, silently; anything unknown = off + refusal."""
+    """-> (mark, refusal | None) for TRUEGAUGE_MARK. mark = "off" or the chosen items in canonical order joined by
+    commas (`underline,braces,bold`). The setting is a comma-separated list of underline, braces, bold, or `all`, or
+    `off`; case and spaces around items do not matter, repeats are fine. Unset or empty = off, silently. ONE unknown
+    item refuses the whole setting (off + the item's name): a part of it is never switched on quietly."""
     s = (raw or "").strip().lower()
     if not s:
         return "off", None
-    if s in MARKS:
-        return s, None
-    return "off", "%r (underline, brackets, both or off)" % raw
+    if s == "off":
+        return "off", None
+    items = [x.strip() for x in s.split(",")]
+    bad = [x for x in items if x != "all" and x not in MARK_ITEMS]
+    if bad:
+        return "off", "%r: unknown item %s (underline, braces, bold, all, or off)" % (raw, ", ".join(repr(x) for x in bad))
+    chosen = set(MARK_ITEMS) if "all" in items else set(items)
+    return ",".join(x for x in MARK_ITEMS if x in chosen), None
+
+
+def _mark_valid(m):
+    """A stored/offered mark is "off" or a canonical list of MARK_ITEMS."""
+    return isinstance(m, str) and (m == "off" or (bool(m) and all(x in MARK_ITEMS for x in m.split(","))))
 
 
 def color_config(environ=None):
@@ -813,14 +828,20 @@ def _cache_cold(pc, now):
 
 
 def _decorate(group, paint, mark):
-    """Colour and/or mark around one group. Order: colour, underline, [text], underline off, colour reset.
-    paint: the colour sequence or None (no colour); mark: one of MARKS."""
-    if mark in ("brackets", "both"):
-        group = "[" + group + "]"
-    if mark in ("underline", "both"):
+    """Colour and/or mark around one group. Order: colour, bold (only when there is no colour: the colour sequence
+    already carries bold), underline, `{`, text, `}`, underline off, then colour reset (it also ends bold) or, without
+    colour, bold off. paint: the colour sequence or None; mark: "off" or a canonical list (see _mark). The group is
+    joined by `+`, never used as a format template: its text may hold braces or percent signs."""
+    items = () if mark == "off" else mark.split(",")
+    bold = "bold" in items
+    if "braces" in items:
+        group = "{" + group + "}"
+    if "underline" in items:
         group = UL_ON + group + UL_OFF
     if paint:
-        group = paint + group + RED_RESET
+        return paint + group + RED_RESET
+    if bold:
+        return BOLD_ON + group + BOLD_OFF
     return group
 
 
@@ -937,7 +958,7 @@ def _saved_render_cfg(d):
               and all(c["th"].get(k) is None or isinstance(c["th"][k], int) for k in RED_VARS)
               and all(k in c["th"] for k in RED_VARS)
               # 0.3 keys: absent in a record written by 0.2 (then --show says nothing about them), wrong shape = damaged
-              and (c.get("cold_sgr") is None or isinstance(c["cold_sgr"], str)) and c.get("mark", "off") in MARKS)
+              and (c.get("cold_sgr") is None or isinstance(c["cold_sgr"], str)) and _mark_valid(c.get("mark", "off")))
     except (KeyError, TypeError):
         ok = False
     return (c, _num(d.get("render_cfg_at"))) if ok else (None, None)

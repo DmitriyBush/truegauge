@@ -1340,17 +1340,19 @@ with envset(TRUEGAUGE_RED_COLOR="ansi"):
     got = tg.render({"five_hour": win("fresh", 100, 7200)}, None, 55.2, "en", 548200, cold=True)
     check("red colour setting does not change the amber one", got == "\033[1;31m2h 100%" + RS + " " + amber(CTX), got)
 
-# ---- the mark without colour (rule 8)
+# ---- the mark without colour (rule 8a): TRUEGAUGE_MARK = list of underline, braces, bold | all | off
+BO, BOX = "\033[1m", "\033[22m"  # bold on / bold off (no colour in the line)
 with envset():
     five = {"five_hour": win("fresh", 98.2, 7200)}
     both_w = {"five_hour": win("fresh", 98.2, 7200), "seven_day": win("fresh", 99.9, 3 * 86400), "fable": win("fresh", 100, None)}
     tk = {"new": 2600000, "complete": True}
     plain_all = tg.render(both_w, tk, 55.2, "en", 548200, cold=True)
     check("mark: unset -> no mark anywhere, line is the colour-only line",
-          plain_all == red_of("2h 98%") + " " + red_of("3d 100%") + " F100% " + amber(CTX) + " Σ2.6M" and "[" not in SGR_RX.sub("", plain_all) and UL not in plain_all, plain_all)
+          plain_all == red_of("2h 98%") + " " + red_of("3d 100%") + " F100% " + amber(CTX) + " Σ2.6M" and "{" not in plain_all and UL not in plain_all and BO not in plain_all, plain_all)
 with envset(TRUEGAUGE_MARK=""):
     check("mark: empty -> off, silently", tg.render(both_w, tk, 55.2, "en", 548200, cold=True) == plain_all
           and "REFUSED" not in shown({"TRUEGAUGE_MARK": ""}))
+# each element alone (with colour)
 with envset(TRUEGAUGE_MARK="underline"):
     got = tg.render(five, None, None, "en", None)
     check("mark=underline, 5h past the threshold: colour, underline on, text, underline off, colour reset",
@@ -1359,56 +1361,124 @@ with envset(TRUEGAUGE_MARK="underline"):
     check("mark=underline, cold: amber, underline around the whole context group",
           got == AMB + UL + CTX + ULX + RS, got)
     check("mark=underline: a group not past the threshold has no mark", tg.render({"five_hour": win("fresh", 38, 7200)}, None, None, "en", None) == "2h 38%")
-with envset(TRUEGAUGE_MARK="brackets"):
+with envset(TRUEGAUGE_MARK="braces"):
     got = tg.render({}, None, 55.2, "en", 548200, cold=True)
-    check("mark=brackets, cold: [T548K 55%] inside the amber", got == AMB + "[" + CTX + "]" + RS, got)
+    check("mark=braces, cold: {T548K 55%} inside the amber", got == AMB + "{" + CTX + "}" + RS, got)
     got = tg.render(five, None, None, "en", None)
-    check("mark=brackets, 5h red: [2h 98%] inside the red, no underline", got == RED + "[2h 98%]" + RS and UL not in got, got)
-with envset(TRUEGAUGE_MARK="both"):
+    check("mark=braces, 5h red: {2h 98%} inside the red, no underline, no square bracket",
+          got == RED + "{2h 98%}" + RS and UL not in got and "[" not in SGR_RX.sub("", got) and "]" not in got, got)
+with envset(TRUEGAUGE_MARK="bold"):
+    got = tg.render(five, None, None, "en", None)
+    check("mark=bold + colour: the colour already carries bold -> line equals the colour-only line (bold not doubled)",
+          got == RED + "2h 98%" + RS and BO not in got and BOX not in got, got)
+    got = tg.render({}, None, 55.2, "en", 548200, cold=True)
+    check("mark=bold + colour, cold: amber only, bold not doubled", got == AMB + CTX + RS and BO not in got, got)
+# pairs (with colour); order of the list does not matter
+with envset(TRUEGAUGE_MARK="underline,braces"):
+    check("mark=underline,braces + colour: colour, underline, {text}, underline off, reset",
+          tg.render(five, None, None, "en", None) == RED + UL + "{2h 98%}" + ULX + RS)
+with envset(TRUEGAUGE_MARK="underline,bold"):
+    check("mark=underline,bold + colour: bold not doubled", tg.render(five, None, None, "en", None) == RED + UL + "2h 98%" + ULX + RS)
+with envset(TRUEGAUGE_MARK="braces,bold"):
+    check("mark=braces,bold + colour: bold not doubled", tg.render(five, None, None, "en", None) == RED + "{2h 98%}" + RS)
+with envset(TRUEGAUGE_MARK="bold,underline"):
+    check("mark=bold,underline == underline,bold (list order does not change the line)",
+          tg.render(five, None, None, "en", None) == RED + UL + "2h 98%" + ULX + RS)
+# all
+with envset(TRUEGAUGE_MARK="all"):
     got = tg.render(both_w, tk, 55.2, "en", 548200, cold=True)
-    want = (RED + UL + "[2h 98%]" + ULX + RS + " " + RED + UL + "[3d 100%]" + ULX + RS + " F100% "
-            + AMB + UL + "[" + CTX + "]" + ULX + RS + " Σ2.6M")
-    check("mark=both, both windows past and cold: three groups in brackets, underlined; F and Σ without mark", got == want, got)
-    check("mark=both: Σ and Fable carry no bracket", "[Σ" not in got and "[F" not in got and SGR_RX.sub("", got).count("[") == 3 and got.count("]") == 3, got)
-    check("mark=both: every underline-on has its underline-off", got.count(UL) == got.count(ULX) == 3, got)
-    check("mark=both, nothing past the threshold, cache warm -> line equals the unmarked line byte for byte",
-          tg.render({"five_hour": win("fresh", 38, 7200)}, tk, 55.2, "en", 548200, cold=False)
-          == "2h 38% T548K 55% Σ2.6M")
-with envset(TRUEGAUGE_MARK="both", NO_COLOR="1"):
-    got = tg.render({}, None, 55.2, "en", 548200, cold=True)
-    check("mark=both + NO_COLOR=1, cold: underlined [T548K 55%], no colour", got == UL + "[" + CTX + "]" + ULX, got)
-    got = tg.render(five, None, None, "en", None)
-    check("mark=both + NO_COLOR=1, 5h red: mark stays, no colour", got == UL + "[2h 98%]" + ULX, got)
-with envset(TRUEGAUGE_MARK="both", TRUEGAUGE_COLD_COLOR="off", TRUEGAUGE_RED_COLOR="ansi"):
-    got = tg.render({}, None, 55.2, "en", 548200, cold=True)
-    check("mark=both + cold colour off: the mark still stands, without colour", got == UL + "[" + CTX + "]" + ULX, got)
-for val in ("BOTH", " both ", "Both", "UNDERLINE", " brackets"):
+    want = (RED + UL + "{2h 98%}" + ULX + RS + " " + RED + UL + "{3d 100%}" + ULX + RS + " F100% "
+            + AMB + UL + "{" + CTX + "}" + ULX + RS + " Σ2.6M")
+    check("mark=all, both windows past and cold: three groups in braces, underlined, bold carried by the colour; F and Σ without mark", got == want, got)
+    check("mark=all: Σ and Fable carry no brace", "{Σ" not in got and "{F" not in got and got.count("{") == 3 and got.count("}") == 3, got)
+    check("mark=all: every underline-on has its underline-off; no square bracket", got.count(UL) == got.count(ULX) == 3 and "[" not in SGR_RX.sub("", got), got)
+    check("mark=all, nothing past the threshold, cache warm -> line equals the unmarked line byte for byte",
+          tg.render({"five_hour": win("fresh", 38, 7200)}, tk, 55.2, "en", 548200, cold=False) == "2h 38% T548K 55% Σ2.6M")
+    nothing = {"five_hour": win("fresh", 38, 7200), "seven_day": win("fresh", 10, 3 * 86400)}
+    with_all = tg.render(nothing, tk, 55.2, "en", 548200, cold=False)
+    os.environ["TRUEGAUGE_MARK"] = ""
+    without = tg.render(nothing, tk, 55.2, "en", 548200, cold=False)
+    check("mark=all, nothing past any threshold and cache warm -> output == no mark, byte for byte",
+          with_all == without and with_all.encode("utf-8") == without.encode("utf-8"), (with_all, without))
+    os.environ["TRUEGAUGE_MARK"] = "all"
+    check("mark=all: the session total alone (Σ) is never marked", tg.render({}, tk, None, "en", None, cold=True) == "Σ2.6M")
+for val in ("ALL", " all ", "All", " underline , bold ", "Bold, BRACES", "bold,bold", " UNDERLINE"):
     with envset(TRUEGAUGE_MARK=val):
         got = tg.render({}, None, 55.2, "en", 548200, cold=True)
         cfgm = tg.color_config()["mark"]
-    check("mark=%r -> accepted as %r" % (val, val.strip().lower()), cfgm == val.strip().lower() and got != amber(CTX), (cfgm, got))
-    check("mark=%r -> --show silent" % val, "REFUSED" not in shown({"TRUEGAUGE_MARK": val}))
-for val in ("box", "1", "yes", "frame", "underline,brackets", "both!"):
+    check("mark=%r -> accepted, canonical %r" % (val, cfgm), cfgm != "off" and "REFUSED" not in shown({"TRUEGAUGE_MARK": val}), (cfgm, got))
+for val, canon in (("ALL", "underline,braces,bold"), (" underline , bold ", "underline,bold"), ("Bold, BRACES", "braces,bold"),
+                   ("bold,bold", "bold"), ("bold,underline,braces", "underline,braces,bold"), ("all,bold", "underline,braces,bold"),
+                   ("UNDERLINE", "underline"), ("off", "off"), ("  OFF ", "off")):
+    check("mark %r -> %r" % (val, canon), tg._mark(val) == (canon, None), tg._mark(val))
+# no colour: bold has its own on/off
+with envset(TRUEGAUGE_MARK="bold", NO_COLOR="1"):
+    got = tg.render(five, None, None, "en", None)
+    check("mark=bold + NO_COLOR=1: ESC[1m ... ESC[22m around the group", got == BO + "2h 98%" + BOX, got)
+    got = tg.render({}, None, 55.2, "en", 548200, cold=True)
+    check("mark=bold + NO_COLOR=1, cold: bold context group", got == BO + CTX + BOX, got)
+with envset(TRUEGAUGE_MARK="all", NO_COLOR="1"):
+    got = tg.render({}, None, 55.2, "en", 548200, cold=True)
+    check("mark=all + NO_COLOR=1, cold: bold, underline, {text}, underline off, bold off; no colour",
+          got == BO + UL + "{" + CTX + "}" + ULX + BOX, got)
+    got = tg.render(five, None, None, "en", None)
+    check("mark=all + NO_COLOR=1, 5h red: mark stays, no colour", got == BO + UL + "{2h 98%}" + ULX + BOX, got)
+    check("mark=all + NO_COLOR=1: no colour sequence in the line", "38;2" not in got and RS not in got, got)
+with envset(TRUEGAUGE_MARK="all", TRUEGAUGE_COLD_COLOR="off", TRUEGAUGE_RED_COLOR="ansi"):
+    got = tg.render({}, None, 55.2, "en", 548200, cold=True)
+    check("mark=all + cold colour off: the mark still stands, bold on its own sequence", got == BO + UL + "{" + CTX + "}" + ULX + BOX, got)
+with envset(TRUEGAUGE_MARK="underline,braces", NO_COLOR="1"):
+    check("mark=underline,braces + NO_COLOR=1: no bold sequence at all",
+          tg.render({}, None, 55.2, "en", 548200, cold=True) == UL + "{" + CTX + "}" + ULX)
+# refusals: the WHOLE setting goes off, the unknown element is named
+for val in ("brackets", "both", "box", "1", "yes", "frame", "underline,brackets", "both!", "bold,box", "all,box", "bold,", ",bold", "off,bold", "underline;bold"):
     with envset(TRUEGAUGE_MARK=val):
         got = tg.render(both_w, tk, 55.2, "en", 548200, cold=True)
+        refusal = tg.color_config()["refused"].get("TRUEGAUGE_MARK", "")
     out = shown({"TRUEGAUGE_MARK": val})
-    check("mark=%r -> off (no mark)" % val, got == plain_all, got)
+    check("mark=%r -> off as a whole (no part switched on)" % val, got == plain_all and tg.color_config({"TRUEGAUGE_MARK": val})["mark"] == "off", got)
     check("mark=%r -> --show names the refusal" % val, "REFUSED" in out and "TRUEGAUGE_MARK" in out, out)
+for val, name in (("bold,box", "'box'"), ("brackets", "'brackets'"), ("both", "'both'"), ("underline,brackets", "'brackets'"), ("all,box", "'box'")):
+    out = shown({"TRUEGAUGE_MARK": val})
+    check("mark=%r -> --show names the item %s" % (val, name), name in out, out)
+with envset(TRUEGAUGE_MARK="bold,box", NO_COLOR="1"):
+    check("mark=bold,box + NO_COLOR=1: bold is not switched on quietly", tg.render(five, None, None, "en", None) == "2h 98%")
 with envset(TRUEGAUGE_MARK="off"):
     check("mark=off -> no mark, silent", tg.render(both_w, tk, 55.2, "en", 548200, cold=True) == plain_all
           and "REFUSED" not in shown({"TRUEGAUGE_MARK": "off"}))
-with envset(TRUEGAUGE_MARK="brackets", TRUEGAUGE_RED_5H="off"):
+with envset(TRUEGAUGE_MARK="braces", TRUEGAUGE_RED_5H="off"):
     got = tg.render({"five_hour": win("fresh", 100, 7200)}, None, None, "en", None)
-    check("mark=brackets, 5h threshold off, 5h at 100% -> no mark (no condition, no mark)", got == "2h 100%", got)
+    check("mark=braces, 5h threshold off, 5h at 100% -> no mark (no condition, no mark)", got == "2h 100%", got)
 with envset(TRUEGAUGE_MARK="underline"):
     check("mark=underline: an expired window has no group, so no mark", tg.render({"five_hour": win("expired", 99.9, -5)}, None, None, "en", None) == "")
     check("mark=underline, cold but no reading: nothing to mark", tg.render({}, None, None, "en", 0, cold=True) == "")
     check("mark=underline, old (>=) reading past the threshold: marked like a fresh one",
           tg.render({"five_hour": win("stale_reading", 97.6, 7200)}, None, None, "en", None) == RED + UL + "2h ≥97%" + ULX + RS)
+# braces on a group with ≥ and Cyrillic: printed as is (the group is concatenated, never a format template)
+with envset(TRUEGAUGE_MARK="braces"):
+    old_ru = tg.render({"five_hour": win("stale_reading", 97.6, 7200)}, None, None, "ru", None)
+    plain_ru = SGR_RX.sub("", old_ru)
+    check("mark=braces on a '≥' group: {…≥97%} printed as is", plain_ru.startswith("{") and plain_ru.endswith("%}") and "≥97%" in plain_ru, old_ru)
+    ctx_ru = tg.render({}, None, 55.2, "ru", 548200, cold=True)
+    stripped = SGR_RX.sub("", ctx_ru)
+    check("mark=braces, Russian line: the context group {…} with its Russian letters intact",
+          stripped.startswith("{") and stripped.endswith("}") and any("а" <= c.lower() <= "я" for c in stripped) and "55%" in stripped, ctx_ru)
+for hostile in ("a{0}b%s{x}%d", "{}", "%(x)s {y!r} {{", "T548K ≥55% Ж"):
+    for mk in ("braces", "underline,braces,bold", "all"):
+        for paint in (None, AMB):
+            got = tg._decorate(hostile, paint, tg._mark(mk)[0])
+            inner = SGR_RX.sub("", got)
+            check("_decorate(%r, paint=%s, %s) keeps the text verbatim inside {…}" % (hostile, bool(paint), mk),
+                  inner == "{" + hostile + "}", got)
+check("_decorate with mark off and no colour returns the group unchanged", tg._decorate("a{0}%s", None, "off") == "a{0}%s")
+check("_mark_valid: canonical lists and off pass; 'brackets' / 'both' / '' / non-str do not",
+      all(tg._mark_valid(x) for x in ("off", "underline", "underline,braces,bold", "bold")) and not any(tg._mark_valid(x) for x in ("brackets", "both", "", "box", None, 5, ["bold"], "bold,")))
 
 # ---- --show: cold colour, mark, cache record
-out = shown({"TRUEGAUGE_MARK": "both", "TRUEGAUGE_COLD_COLOR": "ansi"})
-check("--show: the mark line (this shell)", "mark: both" in out and "cold colour: ESC[1;33m" in out, out)
+out = shown({"TRUEGAUGE_MARK": "all", "TRUEGAUGE_COLD_COLOR": "ansi"})
+check("--show: the mark line (this shell)", "mark: underline,braces,bold" in out and "cold colour: ESC[1;33m" in out, out)
+out = shown({"TRUEGAUGE_MARK": " Bold, underline "})
+check("--show: the mark line shows the canonical list", "mark: underline,bold" in out, out)
 out = shown({})
 check("--show: defaults are amber and mark off", "cold colour: ESC[1;38;2;255;175;0m; mark: off" in out, out)
 fresh()
@@ -1420,6 +1490,10 @@ with envset(TRUEGAUGE_MARK="underline"):
     out = cli("--show")[1]
 check("--show: the status line's own mark and cold colour are shown with its settings",
       "status line cold colour: ESC[1;38;2;255;175;0m; mark: underline" in out, out)
+_cfg0 = {"th": {"five_hour": 98, "seven_day": 99}, "sgr": RED, "no_color": False, "refused": {}, "cold_sgr": AMB}
+for _m, _ok in (("off", True), ("underline,bold", True), ("underline,braces,bold", True), ("brackets", False), ("both", False), ("bold,box", False), ("", False), (5, False)):
+    _got = tg._saved_render_cfg({"render_cfg": dict(_cfg0, mark=_m), "render_cfg_at": 5})[0]
+    check("saved settings with mark %r -> %s" % (_m, "read" if _ok else "damaged (the old words brackets / both are not valid)"), (_got is not None) == _ok, _got)
 
 # ---- the measuring instrument: the last prompt_cache the status line saw
 def cache_rec():
@@ -1609,9 +1683,9 @@ _c, _o = run_script(os.path.join(os.path.dirname(HERE), "truegauge.py"),
                     dict(PAYLOADS3[0], prompt_cache={"caching_observed": True, "warm": False}), {})
 check("end to end: a cold payload really prints an amber context group", (AMB + CTX + RS) in _o.decode("utf-8"), _o)
 _c, _o = run_script(os.path.join(os.path.dirname(HERE), "truegauge.py"),
-                    dict(PAYLOADS3[0], prompt_cache={"caching_observed": True, "warm": False}), {"TRUEGAUGE_MARK": "both"})
-check("end to end: TRUEGAUGE_MARK=both from the environment marks the red windows and the cold context group",
-      _o.decode("utf-8").count(UL) == 3 and SGR_RX.sub("", _o.decode("utf-8")).count("[") == 3, _o)
+                    dict(PAYLOADS3[0], prompt_cache={"caching_observed": True, "warm": False}), {"TRUEGAUGE_MARK": "all"})
+check("end to end: TRUEGAUGE_MARK=all from the environment marks the red windows and the cold context group",
+      _o.decode("utf-8").count(UL) == 3 and _o.decode("utf-8").count("{") == 3 and _o.decode("utf-8").count("}") == 3, _o)
 check("version is 0.3.0", tg.__version__ == "0.3.0")
 
 print("\n%d failed" % len(fails) if fails else "\nALL PASS")
