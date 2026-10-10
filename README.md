@@ -114,6 +114,8 @@ and `--uninstall --force` removes the key.
 | `TRUEGAUGE_RED_5H` | `98` | red threshold of the 5-hour window (see Colors) |
 | `TRUEGAUGE_RED_7D` | `99` | red threshold of the weekly window |
 | `TRUEGAUGE_RED_COLOR` | `#ff0000` | `#rrggbb` or `ansi` |
+| `TRUEGAUGE_COLD_COLOR` | `#ffaf00` | colour of the context group when the cache is cold: `#rrggbb`, `ansi` or `off` (see Cold cache) |
+| `TRUEGAUGE_MARK` | `off` | `underline`, `brackets`, `both` or `off`: a mark without colour (see Colour-blind friendly mark) |
 | `NO_COLOR` | unset | any non-empty value: no colour |
 
 ## Colors
@@ -147,10 +149,10 @@ state file when they change, so an `env` block in settings.json shows up there, 
   theme, so its shade depends on that theme (it can look crimson in some). A wrong value is refused like a
   threshold. The group is closed with `ESC[22;39m` (bold off, default foreground; see the last note below); the
   space between groups is never coloured.
-- `NO_COLOR`: any non-empty value turns colour off entirely, and the output is then byte for byte the same as 0.1.
-  An empty value does not.
-- Only the two plan windows turn red. Fable, tokens and the context fill never do; a window that has reset has no
-  group at all.
+- `NO_COLOR`: any non-empty value turns colour off entirely, and the output is then byte for byte the same as 0.1
+  (while `TRUEGAUGE_MARK` is unset). An empty value does not.
+- Only the two plan windows turn red. Fable, tokens and the context fill never do (the context group has its own
+  amber, see Cold cache below); a window that has reset has no group at all.
 
 The colour follows the **raw reading**: red when the reading, rounded half up, is at or above the threshold. For a
 fresh reading that is the number you see. For an old one it is true too: an old `≥97%` can be red at threshold 98,
@@ -166,6 +168,63 @@ What the line does **not** tell you:
 - The group is closed with `ESC[22;39m`, which switches off bold **and also faint**. If Claude Code draws the
   status line faint, the items after a red group may look brighter than the rest. This is not measured in Claude
   Code (it can only be seen in a terminal). If you cannot see the red at all, try `TRUEGAUGE_RED_COLOR=ansi`.
+
+## Cold cache (amber context group)
+
+The context group (`T548K 55%`, both parts together) turns **amber** when the prompt cache of your main session has
+gone cold. A cold cache means the next message re-sends the whole context at full price instead of the cheap cached
+price, so this is the moment to think before sending a long-context message.
+
+- **Where the data comes from.** Claude Code's status-line input carries a `prompt_cache` object (its documentation:
+  main session only, from v2.1.251; subagents are not counted). truegauge reads `caching_observed`, `warm` and
+  `expires_at` from it.
+- **Cold** means: `caching_observed` is `true` AND (`warm` is `false` OR `expires_at` is a number that has passed).
+  No `prompt_cache`, one of another type, caching not observed, or a field of the wrong type means **not cold**: no
+  data is never shown as cold. Claude Code restarts the line itself when a warm cache reaches `expires_at`, so the
+  amber appears without a new message.
+- **How long a cache lives.** On a subscription, within the plan, the main session's cache lives 1 hour; when usage
+  goes over the plan it is 5 minutes, so amber appears more often then.
+- **What is not coloured.** `Σ` (tokens spent in the session, subagents included) is never coloured: the cache state
+  is known for the main session only, so it cannot say anything about the subagents' part. Fable and the window groups
+  keep their own rules. If there is no context reading (0 tokens: before the first reply, after `/compact`) there is
+  nothing to colour.
+- **Colour.** `TRUEGAUGE_COLD_COLOR`: `#rrggbb` (default `#ffaf00`, bold amber), `ansi` (the bold yellow of your
+  terminal theme) or `off` / `0` (no colour). Empty or unset = default; anything else is refused, the default is used
+  and `--show` names the refusal. `NO_COLOR` removes this colour too. The group is closed with `ESC[22;39m`, like the
+  red ones.
+- **Check that the data really arrives.** The status line keeps the last `prompt_cache` it saw in the state file, and
+  `python truegauge.py --show` prints it: `cache: as the status line saw it at <time>: present=..., warm=..., ttl=...,
+  expires in N s / expired N s ago, recache_if_cold=..., cold now: yes/no`. `cache: no record yet` means the line has
+  not run since this version was installed; `present=False` means Claude Code did not send the object (then amber
+  never appears, by the rule above). The arrival of `prompt_cache` on a given install is not asserted by the tests.
+
+## Colour-blind friendly mark
+
+For people who do not tell the colours apart there is a mark that needs no colour. **It is off by default.**
+`TRUEGAUGE_MARK` (any case, spaces around are ignored):
+
+| Value | What it does |
+|---|---|
+| `off` (or empty, unset) | no mark |
+| `underline` | the group is underlined (`ESC[4m` ... `ESC[24m`, which switches off only the underline) |
+| `brackets` | the group is put in square brackets: `[4h 98%]`, `[T548K 55%]` (a terminal draws no frame around text, brackets are text and show everywhere) |
+| `both` | brackets inside the underline: `[4h 98%]` underlined |
+
+Any other value is refused: no mark, and `--show` names the refusal.
+
+The mark goes on exactly the groups that get a colour, under the same conditions: a window group at or above its red
+threshold, and the context group when the cache is cold. It does not depend on colour: with `NO_COLOR` set or
+`TRUEGAUGE_COLD_COLOR=off` the mark is still drawn (that is who it is for). A threshold set to `off` means no
+condition, so no mark. `Σ` and Fable never get one.
+
+Put it in the `env` block of `~/.claude/settings.json`:
+
+```json
+{ "env": { "TRUEGAUGE_MARK": "both" } }
+```
+
+`python truegauge.py --show` prints `mark: ...` (this shell) and the setting the status line itself last used. How the
+underline looks inside Claude Code's status line has to be checked by eye; the tests check the characters only.
 
 ## Check it
 
@@ -203,6 +262,10 @@ python tests/mutants.py          # breaks the code on purpose; every break must 
 - One state directory per Claude account: two logins sharing `~/.truegauge` would mix their readings --
   give each its own `TRUEGAUGE_HOME`.
 - A transcript replaced by a different file of greater length is not detected (transcripts are append-only).
+- The amber context group follows the cache of the MAIN session only. Subagents have their own cache (5 minutes
+  according to Claude Code's documentation) and the line cannot see it; `Σ` is not coloured for that reason.
+- Whether `prompt_cache` reaches your status line is a property of your Claude Code version; `--show` tells you
+  (`cache:` line). Without it there is no amber, and nothing is guessed.
 
 ## License
 

@@ -1,6 +1,8 @@
 """Question: does the test suite go red when a guarded behaviour is broken? Each mutant edits a COPY of
 truegauge.py in a temp dir and runs the suite against it. CAUGHT = suite red, SLIPPED = suite green (a hole).
-Run: python tests/mutants.py"""
+Run: python tests/mutants.py [--jobs N]   (N parallel suite runs; the first run is a control on an unmutated copy)"""
+import concurrent.futures
+import glob
 import os
 import shutil
 import subprocess
@@ -112,6 +114,73 @@ MUTANTS = [
      '    s = (raw or "").strip()\n    if not (raw or ""):\n        return default, None\n    if s.lower() == "off"'),
     ("red: spaces-only colour is a refusal", '    s = (raw or "").strip()\n    if not s:\n        return _rgb(RED_DEFAULT_RGB), None',
      '    s = (raw or "").strip()\n    if not (raw or ""):\n        return _rgb(RED_DEFAULT_RGB), None'),
+    # ---- 0.3: amber context group when the cache is cold; the mark without colour
+    ("cold: expires_at boundary >= -> >", "return exp is not None and now >= exp", "return exp is not None and now > exp"),
+    ("cold: warm=false no longer wins over a future time", 'if pc.get("warm") is False:\n        return True', 'if False:\n        return True'),
+    ("cold: caching_observed not checked", 'if not isinstance(pc, dict) or pc.get("caching_observed") is not True:', 'if not isinstance(pc, dict):'),
+    ("cold: caching_observed='true' (string) accepted", 'pc.get("caching_observed") is not True', 'pc.get("caching_observed") not in (True, "true")'),
+    ('cold: warm "false" (string) read as False', 'if pc.get("warm") is False:', 'if pc.get("warm") in (False, "false"):'),
+    ("cold: warm=0 read as False", 'if pc.get("warm") is False:', 'if pc.get("warm") == False:'),
+    ("cold: expires_at judged without a type check", 'exp = _num(pc.get("expires_at"))', 'exp = pc.get("expires_at")'),
+    ("cold: now ignored (time 0)", 'cold = _cache_cold(payload.get("prompt_cache"), now)', 'cold = _cache_cold(payload.get("prompt_cache"), 0)'),
+    ("cold: not passed to the renderer", 'os.environ.get("TRUEGAUGE_LANG", "en"), cti, cold)', 'os.environ.get("TRUEGAUGE_LANG", "en"), cti)'),
+    ("cold: Sigma painted", 'parts.append("%s%s%s" % (SIGMA,', 'parts.append("\\033[1;38;2;255;175;0m" + "%s%s%s" % (SIGMA,'),
+    ("cold: only T painted, percent outside", 'group = _decorate(group, None if cc["no_color"] else cc["cold_sgr"], cc["mark"])',
+     'group = _decorate(group.split(" ")[0], None if cc["no_color"] else cc["cold_sgr"], cc["mark"]) + group[len(group.split(" ")[0]):]'),
+    ("cold: empty group painted when there is no reading", "if group and cold and cc is not None:", "if cold and cc is not None:"),
+    ("cold: no reset after a group", "        group = paint + group + RED_RESET", "        group = paint + group"),
+    ("cold: NO_COLOR ignored for the amber", 'group = _decorate(group, None if cc["no_color"] else cc["cold_sgr"], cc["mark"])',
+     'group = _decorate(group, cc["cold_sgr"], cc["mark"])'),
+    ("cold: default amber changed", 'COLD_DEFAULT_RGB = "#ffaf00"', 'COLD_DEFAULT_RGB = "#ffbf00"'),
+    ("cold: ansi colour changed to bright 93", r'COLD_ANSI = "\033[1;33m"', r'COLD_ANSI = "\033[1;93m"'),
+    ("cold: `off` not recognised", 'if s.lower() in ("off", "0"):', 'if s.lower() in ("0",):'),
+    ("cold: `0` not recognised", 'if s.lower() in ("off", "0"):', 'if s.lower() in ("off",):'),
+    ("cold: `off` is case-sensitive", 'if s.lower() in ("off", "0"):', 'if s in ("off", "0"):'),
+    ("cold: empty colour is a refusal, not 'unset'", '    if not s:\n        return _rgb(COLD_DEFAULT_RGB), None',
+     '    if not s and raw is None:\n        return _rgb(COLD_DEFAULT_RGB), None'),
+    ("cold: short hex accepted", 'if re.fullmatch(r"#[0-9a-fA-F]{6}", s):\n        return _rgb(s), None\n    return _rgb(COLD_DEFAULT_RGB)',
+     'if re.fullmatch(r"#[0-9a-fA-F]{3,6}", s):\n        return _rgb(s), None\n    return _rgb(COLD_DEFAULT_RGB)'),
+    ("cold: refused colour not reported", 'return _rgb(COLD_DEFAULT_RGB), "%r (#rrggbb, ansi or off)" % raw', 'return _rgb(COLD_DEFAULT_RGB), None'),
+    ("cold: refusal not stored in the config", '        refused["TRUEGAUGE_COLD_COLOR"] = bad\n', '        pass\n'),
+    ("cold: colour setting read from the red variable", 'cold_sgr, bad = _cold_sgr(env.get("TRUEGAUGE_COLD_COLOR"))', 'cold_sgr, bad = _cold_sgr(env.get("TRUEGAUGE_RED_COLOR"))'),
+    ("cold: the amber test fault takes the whole line (no try/except)", "except Exception as e:  # SF4 cold test", "except ZeroDivisionError as e:  # SF4 cold test"),
+    ("cold: the amber paint fault takes the whole line (no try/except)", "except Exception as e:  # SF4 cold paint", "except ZeroDivisionError as e:  # SF4 cold paint"),
+    ("cache record: fault takes the whole line (no try/except)", "except Exception as e:  # an extra (the measuring instrument)", "except ZeroDivisionError as e:  # an extra (the measuring instrument)"),
+    ("cache record: rewritten on every call", 'if isinstance(old, dict) and {k: v for k, v in old.items() if k != "seen_at"} == rec:\n            return', 'if False:\n            return'),
+    ("cache record: never saved", 'd["prompt_cache_seen"] = dict(rec, seen_at=int(now))', 'pass'),
+    ("cache record: seen_at not recorded", 'dict(rec, seen_at=int(now))', 'dict(rec)'),
+    ("cache record: an absent object not recorded as present=False", 'rec = {"present": isinstance(pc, dict)}', 'rec = {"present": True}'),
+    ("cache record: a container stored whole", 'return "<%s>" % type(v).__name__', 'return v'),
+    ("cache record: nan stored as a number", 'return v if _num(v) is not None else "<float nan/inf>"', 'return v'),
+    ("cache record: long text not cut", "return v[:32]", "return v"),
+    ("cache record: overwrites a damaged state", "        if problem not in (None, \"missing\"):\n            return\n        old = d.get(\"prompt_cache_seen\")", "        old = d.get(\"prompt_cache_seen\")"),
+    ("--show: cold now always no", "    cold = _cache_cold(rec, now)\n", "    cold = False\n"),
+    ("--show: a missing record not named", 'print("cache: no record yet")', 'print("cache: ")'),
+    ("--show: damaged record crashes (not named)", 'print("cache: the record is damaged; the status line rewrites it on its next call")', 'raise KeyError("damaged")'),
+    ("--show: the status line's own mark not saved", '"cold_sgr": cc["cold_sgr"], "mark": cc["mark"],', '"cold_sgr": cc["cold_sgr"], "mark": "off",'),
+    ("mark: on by default", '    s = (raw or "").strip().lower()\n    if not s:\n        return "off", None', '    s = (raw or "").strip().lower()\n    if not s:\n        return "both", None'),
+    ("mark: empty value is a refusal, not 'unset'", '    s = (raw or "").strip().lower()\n    if not s:\n        return "off", None', '    s = (raw or "").strip().lower()\n    if not s and raw is None:\n        return "off", None'),
+    ("mark: case-sensitive", '    s = (raw or "").strip().lower()\n    if not s:\n        return "off", None', '    s = (raw or "").strip()\n    if not s:\n        return "off", None'),
+    ("mark: spaces at the edges refuse it", '    s = (raw or "").strip().lower()\n    if not s:\n        return "off", None', '    s = (raw or "").lower()\n    if not s:\n        return "off", None'),
+    ("mark: unknown value accepted as set", 'return "off", "%r (underline, brackets, both or off)" % raw', 'return "both", None'),
+    ("mark: refusal not reported", 'return "off", "%r (underline, brackets, both or off)" % raw', 'return "off", None'),
+    ("mark: refusal not stored in the config", '        refused["TRUEGAUGE_MARK"] = bad\n', '        pass\n'),
+    ("mark: removed when NO_COLOR is set (window groups)", 'group = _decorate(group, None if cc["no_color"] else cc["sgr"], cc["mark"])',
+     'group = _decorate(group, None if cc["no_color"] else cc["sgr"], "off" if cc["no_color"] else cc["mark"])'),
+    ("mark: removed when NO_COLOR is set (context group)", 'group = _decorate(group, None if cc["no_color"] else cc["cold_sgr"], cc["mark"])',
+     'group = _decorate(group, None if cc["no_color"] else cc["cold_sgr"], "off" if cc["no_color"] else cc["mark"])'),
+    ("mark: removed when the cold colour is off", 'group = _decorate(group, None if cc["no_color"] else cc["cold_sgr"], cc["mark"])',
+     'group = _decorate(group, None if cc["no_color"] else cc["cold_sgr"], cc["mark"] if cc["cold_sgr"] else "off")'),
+    ("mark: no underline-off after an underlined group", "        group = UL_ON + group + UL_OFF", "        group = UL_ON + group"),
+    ("mark: underline-off is a full reset", r'UL_ON, UL_OFF = "\033[4m", "\033[24m"', r'UL_ON, UL_OFF = "\033[4m", "\033[0m"'),
+    ("mark: both does not underline", 'if mark in ("underline", "both"):', 'if mark in ("underline",):'),
+    ("mark: both has no brackets", 'if mark in ("brackets", "both"):', 'if mark in ("brackets",):'),
+    ("mark: underline brings brackets", 'if mark in ("brackets", "both"):', 'if mark in ("brackets", "both", "underline"):'),
+    ("mark: brackets put outside the underline and colour", '    if paint:\n        group = paint + group + RED_RESET\n    return group',
+     '    if paint:\n        group = paint + group + RED_RESET\n    if mark in ("brackets", "both"):\n        group = "[" + group + "]"\n    return group'),
+    ("mark: Sigma bracketed", 'parts.append("%s%s%s" % (SIGMA,', 'parts.append("[" + "%s%s%s" % (SIGMA,'),
+    ("mark: put on a window group that is not past the threshold", "                if _reached(v, cc[\"th\"][key]):\n                    group = _decorate",
+     "                if True:\n                    group = _decorate"),
     # mutants of the TEST FILE: the fuse must not be removable without the suite going red
     ('FUSE: real-directory branch removed', '    for real in REAL_PROTECTED:', '    for real in []:', "test"),
     ('FUSE: outside-root branch removed', '    if not _inside(p, ROOT):', '    if False:', "test"),
@@ -120,22 +189,38 @@ MUTANTS = [
 ]
 
 src = open(SRC, encoding="utf-8").read()
-slipped = 0
 TEST_SRC = open(os.path.join(HERE, "test_truegauge.py"), encoding="utf-8").read()
-for name, old, new, *target in MUTANTS:
+JOBS = int(sys.argv[sys.argv.index("--jobs") + 1]) if "--jobs" in sys.argv else 1  # parallel runs; 1 = one by one
+
+
+def run_one(m):
+    """-> (status, name): CAUGHT | SLIPPED | BLIND."""
+    name, old, new, *target = m
     on_test = bool(target)
     base = TEST_SRC if on_test else src
     if base.count(old) != 1:
-        print("BLIND  %s (pattern found %d times -- mutant not applied)" % (name, base.count(old)))
-        slipped += 1
-        continue
+        return "BLIND  ", "%s (pattern found %d times -- mutant not applied)" % (name, base.count(old))
     d = tempfile.mkdtemp(prefix="tg_mut_")
     os.makedirs(os.path.join(d, "tests"))
+    for ref in glob.glob(os.path.join(HERE, "ref_*.py")):  # the suite loads its reference modules from its own folder
+        shutil.copy(ref, os.path.join(d, "tests"))
     open(os.path.join(d, "truegauge.py"), "w", encoding="utf-8").write(src if on_test else src.replace(old, new))
     open(os.path.join(d, "tests", "test_truegauge.py"), "w", encoding="utf-8").write(TEST_SRC.replace(old, new) if on_test else TEST_SRC)
     r = subprocess.run([sys.executable, os.path.join(d, "tests", "test_truegauge.py")], capture_output=True, text=True)
-    ok = r.returncode != 0
-    slipped += 0 if ok else 1
-    print(("CAUGHT " if ok else "SLIPPED ") + name)
+    return ("CAUGHT " if r.returncode != 0 else "SLIPPED "), name
+
+
+# CONTROL: the unmutated copy must be green, else every "CAUGHT" below would only mean "the harness is broken"
+# (found 2026-10-10: the 0.2 runner did not copy the reference modules, the suite crashed on load, all 95 mutants "caught")
+_status, _ = run_one(("control: no change", "__version__ = ", "__version__ = "))
+if _status != "SLIPPED ":
+    print("CONTROL FAILED: the suite is not green on an unmutated copy; no mutant result below could be trusted -- stopped")
+    sys.exit(2)
+print("control: unmutated copy is green", flush=True)
+slipped = 0
+with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, JOBS)) as pool:
+    for status, name in pool.map(run_one, MUTANTS):  # results come back in list order
+        slipped += 0 if status == "CAUGHT " else 1
+        print(status + name, flush=True)
 print("\n%d of %d caught" % (len(MUTANTS) - slipped, len(MUTANTS)))
 sys.exit(1 if slipped else 0)

@@ -21,7 +21,7 @@ for _k, _v in (("HOME", SANDBOX), ("USERPROFILE", SANDBOX), ("CLAUDE_CONFIG_DIR"
     os.environ[_k] = _v
 # Colour settings of the person running the tests must not reach the checks (a TRUEGAUGE_RED_5H=50 in their shell
 # would turn every 0.1 check at >= 50% into a false FAIL); the colour checks set what they need themselves.
-for _k in ("TRUEGAUGE_RED_5H", "TRUEGAUGE_RED_7D", "TRUEGAUGE_RED_COLOR", "NO_COLOR"):
+for _k in ("TRUEGAUGE_RED_5H", "TRUEGAUGE_RED_7D", "TRUEGAUGE_RED_COLOR", "TRUEGAUGE_COLD_COLOR", "TRUEGAUGE_MARK", "NO_COLOR"):
     os.environ.pop(_k, None)
 import truegauge as tg  # noqa: E402
 
@@ -831,7 +831,7 @@ import importlib.util  # noqa: E402
 import re  # noqa: E402
 import time  # noqa: E402
 
-COLOR_VARS = ("NO_COLOR", "TRUEGAUGE_RED_5H", "TRUEGAUGE_RED_7D", "TRUEGAUGE_RED_COLOR")
+COLOR_VARS = ("NO_COLOR", "TRUEGAUGE_RED_5H", "TRUEGAUGE_RED_7D", "TRUEGAUGE_RED_COLOR", "TRUEGAUGE_COLD_COLOR", "TRUEGAUGE_MARK")
 RED = "\033[1;38;2;255;0;0m"
 RS = "\033[22;39m"
 SGR_RX = re.compile(r"\x1b\[[0-9;]*m")
@@ -999,7 +999,7 @@ check("--show: says the values are those of this shell, settings.json env seen o
 check("--show: per-window verdict (5h past, week not)", "five_hour: past the red threshold: yes" in out
       and "seven_day: past the red threshold: no" in out, out)
 check("--show: with refusals the line lists them", "REFUSED (default used): TRUEGAUGE_RED_5H='abc'" in shown({"TRUEGAUGE_RED_5H": "abc"}))
-check("version is 0.2.0", tg.__version__ == "0.2.0")
+check("version is 0.2.0 or later (0.3.0 is pinned in the 0.3 block)", tg.__version__ in ("0.2.0", "0.3.0"))
 
 # ---- equivalence with v0.1.0 (kept byte for byte as tests/ref_v0_1_0.py)
 _spec = importlib.util.spec_from_file_location("ref_v0_1_0", os.path.join(HERE, "ref_v0_1_0.py"))
@@ -1216,6 +1216,401 @@ for var in ("TRUEGAUGE_RED_5H", "TRUEGAUGE_RED_7D", "TRUEGAUGE_RED_COLOR"):
         with envset(**{var: blank}):
             ok = g5(97.5) == red_of("2h 98%") and g7(98.5) == red_of("3d 99%") and g5(97.49) == "2h 97%"
         check("CR2: %s=%r (spaces only) = not set: default, --show silent" % (var, blank), ok and "REFUSED" not in out, out)
+
+# ======================================================================== 0.3: amber context group when the main session's cache is cold
+# (table of boundaries: 01_PROEKT.md section 2; now = 1000000)
+AMB = "\033[1;38;2;255;175;0m"
+UL, ULX = "\033[4m", "\033[24m"
+CNOW = 1_000_000
+CTX = "T548K 55%"
+
+
+def amber(text):
+    return AMB + text + RS
+
+
+def cold_of(pc, now=CNOW):
+    return tg._cache_cold(pc, now)
+
+
+def ctxline(pc, now=CNOW, st=None, tokens=None, pct=55.2, cti=548200):
+    """The line the renderer gives for a prompt_cache value: the same decision function the status line uses."""
+    return tg.render(st or {}, tokens, pct, "en", cti, cold=cold_of(pc, now))
+
+
+def PC(observed=True, warm=True, exp=CNOW + 100, **more):
+    d = {"caching_observed": observed, "warm": warm, "expires_at": exp, "ttl": "1h"}
+    d.update(more)
+    return {k: v for k, v in d.items() if v is not ABSENT}
+
+
+ABSENT = object()
+
+with envset():
+    # ---- the decision (rule 2) -- one check per row of the table
+    check("cold: prompt_cache absent -> plain", ctxline(None) == CTX, ctxline(None))
+    for what, pc in (("null", None), ("a list", []), ("a string", "cold"), ("a number", 5), ("true", True)):
+        check("cold: prompt_cache = %s -> plain" % what, ctxline(pc) == CTX and cold_of(pc) is False, ctxline(pc))
+    check("cold: observed, warm, expires_at = now+1 -> plain", ctxline(PC(exp=CNOW + 1)) == CTX)
+    check("cold: observed, warm, expires_at = now -> AMBER (the moment it cools)", ctxline(PC(exp=CNOW)) == amber(CTX), ctxline(PC(exp=CNOW)))
+    check("cold: observed, warm, expires_at = now-1 -> AMBER", ctxline(PC(exp=CNOW - 1)) == amber(CTX), ctxline(PC(exp=CNOW - 1)))
+    check("cold: observed, warm=false, expires_at=null -> AMBER", ctxline(PC(warm=False, exp=None)) == amber(CTX))
+    check("cold: observed, warm=false, expires_at=now+3600 -> AMBER (warm wins over a future time)",
+          ctxline(PC(warm=False, exp=CNOW + 3600)) == amber(CTX))
+    check("cold: observed=false, warm=false -> plain (nothing was cached, nothing cooled)", ctxline(PC(observed=False, warm=False)) == CTX)
+    check("cold: observed missing, warm=false -> plain", ctxline(PC(observed=ABSENT, warm=False)) == CTX)
+    check("cold: observed='true' (a string), warm=false -> plain", ctxline(PC(observed="true", warm=False)) == CTX)
+    check("cold: observed=1 (a number), warm=false -> plain", ctxline(PC(observed=1, warm=False)) == CTX)
+    check("cold: observed=true, warm='false' (a string), expires_at=now+10 -> plain", ctxline(PC(warm="false", exp=CNOW + 10)) == CTX)
+    check("cold: observed=true, warm='false', expires_at=now-10 -> AMBER (by the time)", ctxline(PC(warm="false", exp=CNOW - 10)) == amber(CTX))
+    check("cold: warm=0 (a number, not False) with a past time -> by the time only", ctxline(PC(warm=0, exp=CNOW - 10)) == amber(CTX)
+          and ctxline(PC(warm=0, exp=CNOW + 10)) == CTX)
+    check("cold: observed, warm=true, expires_at=null -> plain", ctxline(PC(exp=None)) == CTX)
+    check("cold: warm absent, expires_at in the past -> AMBER", ctxline(PC(warm=ABSENT, exp=CNOW - 1)) == amber(CTX))
+    check("cold: warm absent, expires_at absent -> plain", ctxline(PC(warm=ABSENT, exp=ABSENT)) == CTX)
+    for bad in ("1000", "999999", True, False, [1], {"a": 1}, float("nan"), float("inf"), float("-inf")):
+        check("cold: observed, warm=true, expires_at=%r -> plain (not a number, not judged)" % (bad,), ctxline(PC(exp=bad)) == CTX)
+    check("cold: expires_at as a float in the past -> AMBER", ctxline(PC(exp=CNOW - 0.5)) == amber(CTX))
+
+    # ---- what is painted (rule 1)
+    check("cold, no T and no percent (0 tokens) -> nothing painted, line empty",
+          tg.render({}, None, None, "en", 0, cold=True) == "")
+    check("cold, 0 tokens with a percent of 0 -> nothing painted, no reading",
+          tg.render({}, None, 0, "en", 0, cold=True) == "")
+    base = tg.render({"five_hour": win("fresh", 38, 14400)}, {"new": 2600000, "complete": True}, None, "en", 0, cold=False)
+    check("cold, no reading: the line equals the line with a warm cache",
+          tg.render({"five_hour": win("fresh", 38, 14400)}, {"new": 2600000, "complete": True}, None, "en", 0, cold=True) == base, base)
+    check("cold, only a percent (no T) -> only the percent is painted", tg.render({}, None, 55.2, "en", None, cold=True) == amber("55%"))
+    check("cold, only T (no percent) -> only T is painted", tg.render({}, None, None, "en", 548200, cold=True) == amber("T548K"))
+    check("cold, both -> one sequence around both with the space inside",
+          tg.render({}, None, 55.2, "en", 548200, cold=True) == AMB + "T548K 55%" + RS)
+    full = tg.render({"five_hour": win("fresh", 98.2, 7200), "fable": win("fresh", 4, None)},
+                     {"new": 2600000, "complete": True}, 55.2, "en", 548200, cold=True)
+    check("cold + 5h past the red threshold: 5h red, context amber, plain spaces between, F and Σ without colour",
+          full == red_of("2h 98%") + " F4% " + amber(CTX) + " Σ2.6M", full)
+    check("cold: Σ is never painted (2 sequences starts, 2 resets)", full.count("\x1b[1;38") == 2 and full.count(RS) == 2, full)
+    full_ru = tg.render({}, {"new": 2600000, "complete": True}, 55.2, "ru", 548200, cold=True)
+    check("cold, ru words: amber around Т548К 55%, Σ outside", full_ru == amber("Т548К 55%") + " Σ2.6М", full_ru)
+    check("cold group sits between Fable and Σ (order of groups unchanged)",
+          full.index("F4%") < full.index(AMB) < full.index("Σ"))
+    check("a warm cache: the full line has no amber at all",
+          AMB not in tg.render({"five_hour": win("fresh", 98.2, 7200)}, {"new": 2600000, "complete": True}, 55.2, "en", 548200, cold=False))
+
+with envset(NO_COLOR="1"):
+    check("NO_COLOR=1 + cold: no escape at all, line equals the warm one",
+          tg.render({"five_hour": win("fresh", 100, 7200)}, {"new": 2600000, "complete": True}, 55.2, "en", 548200, cold=True)
+          == "2h 100% T548K 55% Σ2.6M")
+
+# ---- COLD colour setting (rule 3)
+for off in ("off", "OFF", "Off", "0", " off "):
+    with envset(TRUEGAUGE_COLD_COLOR=off):
+        got = tg.render({}, None, 55.2, "en", 548200, cold=True)
+        check("TRUEGAUGE_COLD_COLOR=%r -> no colour" % off, got == CTX, got)
+    out = shown({"TRUEGAUGE_COLD_COLOR": off})
+    check("TRUEGAUGE_COLD_COLOR=%r -> --show says off, not a refusal" % off, "cold colour: off" in out and "REFUSED" not in out, out)
+with envset(TRUEGAUGE_COLD_COLOR="ansi"):
+    check("TRUEGAUGE_COLD_COLOR=ansi -> bold yellow", tg.render({}, None, 55.2, "en", 548200, cold=True) == "\033[1;33m" + CTX + RS)
+with envset(TRUEGAUGE_COLD_COLOR="ANSI"):
+    check("TRUEGAUGE_COLD_COLOR=ANSI -> bold yellow", tg.render({}, None, 55.2, "en", 548200, cold=True) == "\033[1;33m" + CTX + RS)
+for val in ("#FFAF00", "#ffaf00", " #ffaf00 "):
+    with envset(TRUEGAUGE_COLD_COLOR=val):
+        check("TRUEGAUGE_COLD_COLOR=%r -> accepted (amber)" % val, tg.render({}, None, 55.2, "en", 548200, cold=True) == amber(CTX))
+    check("TRUEGAUGE_COLD_COLOR=%r -> --show silent" % val, "REFUSED" not in shown({"TRUEGAUGE_COLD_COLOR": val}))
+with envset(TRUEGAUGE_COLD_COLOR="#00ff7f"):
+    check("TRUEGAUGE_COLD_COLOR=#00ff7f -> that colour, bold",
+          tg.render({}, None, 55.2, "en", 548200, cold=True) == "\033[1;38;2;0;255;127m" + CTX + RS)
+for val in ("yellow", "#ffa", "#gg0000", "#ffaf000", "ffaf00", "33", "of"):
+    with envset(TRUEGAUGE_COLD_COLOR=val):
+        got = tg.render({}, None, 55.2, "en", 548200, cold=True)
+    out = shown({"TRUEGAUGE_COLD_COLOR": val})
+    check("TRUEGAUGE_COLD_COLOR=%r -> default amber used" % val, got == amber(CTX), got)
+    check("TRUEGAUGE_COLD_COLOR=%r -> --show names the refusal" % val, "REFUSED" in out and "TRUEGAUGE_COLD_COLOR" in out, out)
+for blank in ("", "  ", "\t"):
+    with envset(TRUEGAUGE_COLD_COLOR=blank):
+        got = tg.render({}, None, 55.2, "en", 548200, cold=True)
+    check("TRUEGAUGE_COLD_COLOR=%r -> default amber, --show silent" % blank,
+          got == amber(CTX) and "REFUSED" not in shown({"TRUEGAUGE_COLD_COLOR": blank}), got)
+with envset(TRUEGAUGE_RED_5H="off"):
+    got = tg.render({"five_hour": win("fresh", 100, 7200)}, None, 55.2, "en", 548200, cold=True)
+    check("red threshold off + cold: no red, amber present (settings are independent)", got == "2h 100% " + amber(CTX), got)
+with envset(TRUEGAUGE_COLD_COLOR="off"):
+    got = tg.render({"five_hour": win("fresh", 100, 7200)}, None, 55.2, "en", 548200, cold=True)
+    check("cold colour off + red window: red stays (settings are independent)", got == red_of("2h 100%") + " " + CTX, got)
+with envset(TRUEGAUGE_RED_COLOR="ansi"):
+    got = tg.render({"five_hour": win("fresh", 100, 7200)}, None, 55.2, "en", 548200, cold=True)
+    check("red colour setting does not change the amber one", got == "\033[1;31m2h 100%" + RS + " " + amber(CTX), got)
+
+# ---- the mark without colour (rule 8)
+with envset():
+    five = {"five_hour": win("fresh", 98.2, 7200)}
+    both_w = {"five_hour": win("fresh", 98.2, 7200), "seven_day": win("fresh", 99.9, 3 * 86400), "fable": win("fresh", 100, None)}
+    tk = {"new": 2600000, "complete": True}
+    plain_all = tg.render(both_w, tk, 55.2, "en", 548200, cold=True)
+    check("mark: unset -> no mark anywhere, line is the colour-only line",
+          plain_all == red_of("2h 98%") + " " + red_of("3d 100%") + " F100% " + amber(CTX) + " Σ2.6M" and "[" not in SGR_RX.sub("", plain_all) and UL not in plain_all, plain_all)
+with envset(TRUEGAUGE_MARK=""):
+    check("mark: empty -> off, silently", tg.render(both_w, tk, 55.2, "en", 548200, cold=True) == plain_all
+          and "REFUSED" not in shown({"TRUEGAUGE_MARK": ""}))
+with envset(TRUEGAUGE_MARK="underline"):
+    got = tg.render(five, None, None, "en", None)
+    check("mark=underline, 5h past the threshold: colour, underline on, text, underline off, colour reset",
+          got == RED + UL + "2h 98%" + ULX + RS, got)
+    got = tg.render({}, None, 55.2, "en", 548200, cold=True)
+    check("mark=underline, cold: amber, underline around the whole context group",
+          got == AMB + UL + CTX + ULX + RS, got)
+    check("mark=underline: a group not past the threshold has no mark", tg.render({"five_hour": win("fresh", 38, 7200)}, None, None, "en", None) == "2h 38%")
+with envset(TRUEGAUGE_MARK="brackets"):
+    got = tg.render({}, None, 55.2, "en", 548200, cold=True)
+    check("mark=brackets, cold: [T548K 55%] inside the amber", got == AMB + "[" + CTX + "]" + RS, got)
+    got = tg.render(five, None, None, "en", None)
+    check("mark=brackets, 5h red: [2h 98%] inside the red, no underline", got == RED + "[2h 98%]" + RS and UL not in got, got)
+with envset(TRUEGAUGE_MARK="both"):
+    got = tg.render(both_w, tk, 55.2, "en", 548200, cold=True)
+    want = (RED + UL + "[2h 98%]" + ULX + RS + " " + RED + UL + "[3d 100%]" + ULX + RS + " F100% "
+            + AMB + UL + "[" + CTX + "]" + ULX + RS + " Σ2.6M")
+    check("mark=both, both windows past and cold: three groups in brackets, underlined; F and Σ without mark", got == want, got)
+    check("mark=both: Σ and Fable carry no bracket", "[Σ" not in got and "[F" not in got and SGR_RX.sub("", got).count("[") == 3 and got.count("]") == 3, got)
+    check("mark=both: every underline-on has its underline-off", got.count(UL) == got.count(ULX) == 3, got)
+    check("mark=both, nothing past the threshold, cache warm -> line equals the unmarked line byte for byte",
+          tg.render({"five_hour": win("fresh", 38, 7200)}, tk, 55.2, "en", 548200, cold=False)
+          == "2h 38% T548K 55% Σ2.6M")
+with envset(TRUEGAUGE_MARK="both", NO_COLOR="1"):
+    got = tg.render({}, None, 55.2, "en", 548200, cold=True)
+    check("mark=both + NO_COLOR=1, cold: underlined [T548K 55%], no colour", got == UL + "[" + CTX + "]" + ULX, got)
+    got = tg.render(five, None, None, "en", None)
+    check("mark=both + NO_COLOR=1, 5h red: mark stays, no colour", got == UL + "[2h 98%]" + ULX, got)
+with envset(TRUEGAUGE_MARK="both", TRUEGAUGE_COLD_COLOR="off", TRUEGAUGE_RED_COLOR="ansi"):
+    got = tg.render({}, None, 55.2, "en", 548200, cold=True)
+    check("mark=both + cold colour off: the mark still stands, without colour", got == UL + "[" + CTX + "]" + ULX, got)
+for val in ("BOTH", " both ", "Both", "UNDERLINE", " brackets"):
+    with envset(TRUEGAUGE_MARK=val):
+        got = tg.render({}, None, 55.2, "en", 548200, cold=True)
+        cfgm = tg.color_config()["mark"]
+    check("mark=%r -> accepted as %r" % (val, val.strip().lower()), cfgm == val.strip().lower() and got != amber(CTX), (cfgm, got))
+    check("mark=%r -> --show silent" % val, "REFUSED" not in shown({"TRUEGAUGE_MARK": val}))
+for val in ("box", "1", "yes", "frame", "underline,brackets", "both!"):
+    with envset(TRUEGAUGE_MARK=val):
+        got = tg.render(both_w, tk, 55.2, "en", 548200, cold=True)
+    out = shown({"TRUEGAUGE_MARK": val})
+    check("mark=%r -> off (no mark)" % val, got == plain_all, got)
+    check("mark=%r -> --show names the refusal" % val, "REFUSED" in out and "TRUEGAUGE_MARK" in out, out)
+with envset(TRUEGAUGE_MARK="off"):
+    check("mark=off -> no mark, silent", tg.render(both_w, tk, 55.2, "en", 548200, cold=True) == plain_all
+          and "REFUSED" not in shown({"TRUEGAUGE_MARK": "off"}))
+with envset(TRUEGAUGE_MARK="brackets", TRUEGAUGE_RED_5H="off"):
+    got = tg.render({"five_hour": win("fresh", 100, 7200)}, None, None, "en", None)
+    check("mark=brackets, 5h threshold off, 5h at 100% -> no mark (no condition, no mark)", got == "2h 100%", got)
+with envset(TRUEGAUGE_MARK="underline"):
+    check("mark=underline: an expired window has no group, so no mark", tg.render({"five_hour": win("expired", 99.9, -5)}, None, None, "en", None) == "")
+    check("mark=underline, cold but no reading: nothing to mark", tg.render({}, None, None, "en", 0, cold=True) == "")
+    check("mark=underline, old (>=) reading past the threshold: marked like a fresh one",
+          tg.render({"five_hour": win("stale_reading", 97.6, 7200)}, None, None, "en", None) == RED + UL + "2h ≥97%" + ULX + RS)
+
+# ---- --show: cold colour, mark, cache record
+out = shown({"TRUEGAUGE_MARK": "both", "TRUEGAUGE_COLD_COLOR": "ansi"})
+check("--show: the mark line (this shell)", "mark: both" in out and "cold colour: ESC[1;33m" in out, out)
+out = shown({})
+check("--show: defaults are amber and mark off", "cold colour: ESC[1;38;2;255;175;0m; mark: off" in out, out)
+fresh()
+_n = time.time()
+tg.update(rl(five=(97.6, int(_n) + 7200)), _n)
+check("--show: no record of prompt_cache -> 'cache: no record yet'", "cache: no record yet" in cli("--show")[1], cli("--show")[1])
+with envset(TRUEGAUGE_MARK="underline"):
+    tg._remember_render_cfg(tg.color_config(), _n)
+    out = cli("--show")[1]
+check("--show: the status line's own mark and cold colour are shown with its settings",
+      "status line cold colour: ESC[1;38;2;255;175;0m; mark: underline" in out, out)
+
+# ---- the measuring instrument: the last prompt_cache the status line saw
+def cache_rec():
+    return state_now().get("prompt_cache_seen")
+
+
+def sl_pc(pc, now, key="prompt_cache", **extra):
+    pl = rl(five=(10, int(now) + 7200), context_window={"used_percentage": 55.2, "total_input_tokens": 548200}, **extra)
+    if pc is not ABSENT:
+        pl[key] = pc
+    old_fable = os.environ.get("TRUEGAUGE_FABLE")
+    os.environ["TRUEGAUGE_FABLE"] = "0"  # no background `claude -p /usage` from these checks
+    try:
+        with envset():
+            return tg.statusline(pl, now)
+    finally:
+        if old_fable is None:
+            os.environ.pop("TRUEGAUGE_FABLE", None)
+        else:
+            os.environ["TRUEGAUGE_FABLE"] = old_fable
+
+
+fresh()
+_n = time.time()
+sl_pc(ABSENT, _n)
+r = cache_rec()
+check("cache record: no prompt_cache -> present=False, every field empty",
+      isinstance(r, dict) and r["present"] is False and r["warm"] is None and r["expires_at"] is None and r["seen_at"] == int(_n), r)
+check("cache record: --show says present=False and cold now: no",
+      "present=False" in cli("--show")[1] and "cold now: no" in cli("--show")[1], cli("--show")[1])
+sl_pc(ABSENT, _n + 50)
+check("cache record: the same thing again -> not rewritten (seen_at unchanged)", cache_rec()["seen_at"] == int(_n), cache_rec())
+pcx = {"warm": True, "caching_observed": True, "ttl": "1h", "expires_at": int(_n) + 3000, "recache_tokens_if_cold": 548200,
+       "other": "ignored"}
+sl_pc(pcx, _n + 100)
+r = cache_rec()
+check("cache record: an object -> the six fields kept as sent, seen_at is the new time",
+      r == {"present": True, "warm": True, "caching_observed": True, "ttl": "1h", "expires_at": int(_n) + 3000,
+            "recache_tokens_if_cold": 548200, "seen_at": int(_n) + 100}, r)
+check("cache record: unknown fields are not stored", "other" not in r)
+sl_pc(pcx, _n + 200)
+check("cache record: the same object again -> not rewritten", cache_rec()["seen_at"] == int(_n) + 100, cache_rec())
+sl_pc(dict(pcx, expires_at=int(_n) + 3300), _n + 300)
+check("cache record: a changed expires_at -> rewritten with the new time", cache_rec()["seen_at"] == int(_n) + 300
+      and cache_rec()["expires_at"] == int(_n) + 3300, cache_rec())
+sl_pc(dict(pcx, warm="false", ttl={"a": 1}, expires_at="soon", recache_tokens_if_cold=[1]), _n + 400)
+r = cache_rec()
+check("cache record: a value of the wrong type is kept as seen (strings) or by its type name (containers), never lost",
+      r["warm"] == "false" and r["ttl"] == "<dict>" and r["expires_at"] == "soon" and r["recache_tokens_if_cold"] == "<list>", r)
+sl_pc("not an object", _n + 500)
+check("cache record: prompt_cache that is not an object -> present=False", cache_rec()["present"] is False, cache_rec())
+sl_pc(dict(pcx, warm="x" * 500), _n + 600)
+check("cache record: long text is cut", len(cache_rec()["warm"]) == 32, cache_rec())
+sl_pc(dict(pcx, expires_at=float("nan")), _n + 700)
+check("cache record: nan is stored as text, the state stays valid JSON",
+      cache_rec()["expires_at"] == "<float nan/inf>" and tg._read()[1] is None, cache_rec())
+check("cache record: the state still holds the plan numbers after the cache writes", "five_hour" in state_now() and "render_cfg" in state_now())
+# --show reading of the record
+for label, pc, want in (("expires in the future", dict(pcx, expires_at=int(time.time()) + 100), ("expires in", "cold now: no")),
+                        ("expired", dict(pcx, expires_at=int(time.time()) - 100), ("expired", "cold now: yes")),
+                        ("warm=false", dict(pcx, warm=False, expires_at=None), ("expires_at=None", "cold now: yes")),
+                        ("not observed", dict(pcx, caching_observed=False, warm=False), ("caching_observed=False", "cold now: no"))):
+    fresh()
+    _t = time.time()
+    sl_pc(pc, _t)
+    out = cli("--show")[1]
+    line = [x for x in out.splitlines() if x.startswith("cache:")]
+    check("--show cache line, %s" % label, len(line) == 1 and all(w in line[0] for w in want) and "present=True" in line[0]
+          and "ttl='1h'" in line[0] and "recache_if_cold=548200" in line[0] and "as the status line saw it at" in line[0], line)
+fresh()
+tg.update(rl(five=(10, int(_n) + 7200)), _n)
+d = state_now()
+d["prompt_cache_seen"] = {"present": "yes"}
+tg._save(d)
+check("--show: a damaged cache record is named, --show does not crash", "cache: the record is damaged" in cli("--show")[1])
+
+# ---- the whole status line with a prompt_cache (the time passed in is the time used)
+fresh()
+_n = 1_700_000_000.0
+out1 = sl_pc(dict(pcx, expires_at=int(_n) - 1), _n)
+check("statusline: expires_at one second before `now` -> amber context group", AMB + CTX + RS in out1, out1)
+fresh()
+out2 = sl_pc(dict(pcx, expires_at=int(_n) + 1), _n)
+check("statusline: expires_at one second after `now` -> no amber", AMB not in out2 and CTX in out2, out2)
+fresh()
+out3 = sl_pc(dict(pcx, warm=False), _n)
+check("statusline: warm=false -> amber", AMB + CTX + RS in out3, out3)
+fresh()
+out4 = sl_pc(ABSENT, _n)
+check("statusline: no prompt_cache -> no amber", AMB not in out4 and CTX in out4, out4)
+check("statusline: amber is the only difference between cold and warm lines", SGR_RX.sub("", out1) == SGR_RX.sub("", out2) == SGR_RX.sub("", out4))
+
+# SF4 for the new code: a fault costs the colour or the record, never the line
+fresh()
+_n = time.time()
+for what in ("_cache_cold", "_decorate", "_remember_cache", "_cold_sgr", "_mark"):
+    fresh()
+    orig = getattr(tg, what)
+
+    def boom(*a, **k):
+        raise RuntimeError("probe")
+    setattr(tg, what, boom)
+    try:
+        errs = count_errors(lambda: sl_pc(dict(pcx, warm=False), _n))
+        line = sl_pc(dict(pcx, warm=False), _n)
+    finally:
+        setattr(tg, what, orig)
+    check("SF4 (0.3): %s raises -> the line still has its numbers" % what, "T548K 55%" in line and "10%" in line, line)
+    check("SF4 (0.3): %s raises -> no half-written escape (every start has its reset)" % what,
+          line.count("\x1b[1;") == line.count(RS) and line.count(UL) == line.count(ULX), line)
+    check("SF4 (0.3): %s raises -> the error is recorded" % what, any("probe" in e for e in errs), errs)
+fresh()
+orig = tg._cache_cold
+tg._cache_cold = boom
+try:
+    line = sl_pc(dict(pcx, warm=False), _n)
+finally:
+    tg._cache_cold = orig
+check("SF4 (0.3): the cold test failing means not cold (no amber, no error escape)", AMB not in line and CTX in line, line)
+
+# ---- equivalence with v0.2.0 (kept byte for byte as tests/ref_v0_2_0.py)
+_spec2 = importlib.util.spec_from_file_location("ref_v0_2_0", os.path.join(HERE, "ref_v0_2_0.py"))
+ref2 = importlib.util.module_from_spec(_spec2)
+_spec2.loader.exec_module(ref2)
+check("reference module is v0.2.0", ref2.__version__ == "0.2.0", ref2.__version__)
+EXTRA = [(win("fresh", 98.2, 7200), win("fresh", 99.9, 3 * 86400), win("fresh", 4, None), {"new": 2600000, "complete": True}, (55.2, 548200), "en"),
+         (win("stale_reading", 97.6, 7200), None, None, None, (0, 0), "ru"),
+         (None, win("fresh", 54, 5 * 86400), win("stale_reading", 99, 86400), {"new": 2650000, "complete": False}, (None, 548200), "en"),
+         (win("fresh", 38.5, 14400), win("fresh", 99, 3600), {"status": "absent"}, None, (55.2, None), "ru")]
+for e5, e7, efb, etk, ectx, elang in EXTRA:
+    states.append(({n: v for n, v in (("five_hour", e5), ("seven_day", e7), ("fable", efb)) if v is not None}, etk, ectx, elang))
+check("equivalence set (0.3 against 0.2) has at least 30 states", len(states) >= 30, len(states))
+
+
+def both2(s, cold):
+    return (tg.render(s[0], s[1], s[2][0], s[3], s[2][1], cold=cold), ref2.render(s[0], s[1], s[2][0], s[3], s[2][1]))
+
+
+for label, cold in (("a warm cache / no prompt_cache", False),):
+    with envset(NO_COLOR="1"):
+        diff = [s for s in states if both2(s, cold)[0] != both2(s, cold)[1]]
+    check("equivalence 0.3 == 0.2 (%s), NO_COLOR=1: byte for byte on all %d states" % (label, len(states)), diff == [], diff[:1])
+    with envset():
+        diff = [s for s in states if both2(s, cold)[0] != both2(s, cold)[1]]
+    check("equivalence 0.3 == 0.2 (%s), colours on: byte for byte on all %d states" % (label, len(states)), diff == [], diff[:1])
+with envset(NO_COLOR="1"):
+    diff = [s for s in states if both2(s, True)[0] != both2(s, True)[1]]
+check("equivalence 0.3 == 0.2 with a COLD cache, NO_COLOR=1: byte for byte on all %d states" % len(states), diff == [], diff[:1])
+with envset():
+    outs2 = [both2(s, True) for s in states]
+check("equivalence 0.3 == 0.2 with a COLD cache, SGR stripped: identical on all %d states" % len(states),
+      all(SGR_RX.sub("", a) == SGR_RX.sub("", b) for a, b in outs2), [o for o in outs2 if SGR_RX.sub("", o[0]) != SGR_RX.sub("", o[1])][:1])
+check("equivalence with a cold cache is not vacuous: 0.3 paints a context group on many states",
+      sum(AMB in a for a, b in outs2) >= 20 and not any(AMB in b for a, b in outs2), sum(AMB in a for a, b in outs2))
+with envset(TRUEGAUGE_MARK="off", TRUEGAUGE_COLD_COLOR="off"):
+    diff = [s for s in states if both2(s, True)[0] != both2(s, True)[1]]
+check("equivalence: cold colour off + mark off -> a cold cache changes nothing, byte for byte", diff == [], diff[:1])
+
+# end to end: the real scripts, with and without prompt_cache
+PAYLOADS3 = [dict(PAYLOADS[0], context_window={"used_percentage": 55.2, "total_input_tokens": 548200}),
+             dict(PAYLOADS[1], context_window={"used_percentage": 12, "total_input_tokens": 90000}),
+             PAYLOADS[2], PAYLOADS[3]]
+okb = okc = oks = True
+for pl in PAYLOADS3:
+    s_ref = os.path.join(HERE, "ref_v0_2_0.py")
+    s_new = os.path.join(os.path.dirname(HERE), "truegauge.py")
+    c1, o1 = run_script(s_ref, pl, {})
+    c2, o2 = run_script(s_new, pl, {})
+    c3, o3 = run_script(s_ref, pl, {"NO_COLOR": "1"})
+    c4, o4 = run_script(s_new, pl, {"NO_COLOR": "1"})
+    okb = okb and c1 == c2 == c3 == c4 == 0 and o1 == o2 and o3 == o4
+    for pcw in ({"caching_observed": True, "warm": False, "ttl": "1h", "expires_at": None},
+                {"caching_observed": True, "warm": True, "ttl": "5m", "expires_at": _now - 5},
+                {"caching_observed": True, "warm": True, "ttl": "1h", "expires_at": _now + 3000}):
+        plc = dict(pl, prompt_cache=pcw)
+        c5, o5 = run_script(s_new, plc, {})
+        c6, o6 = run_script(s_new, plc, {"NO_COLOR": "1"})
+        c7, o7 = run_script(s_ref, plc, {})
+        okc = okc and c5 == c6 == c7 == 0 and SGR_RX.sub("", o5.decode("utf-8")) == SGR_RX.sub("", o7.decode("utf-8")) and o6 == o3
+        oks = oks and o6 == o3
+check("end to end (real scripts, %d payloads): without prompt_cache 0.3 == 0.2 byte for byte, colours on and NO_COLOR=1" % len(PAYLOADS3), okb)
+check("end to end: with prompt_cache (cold and warm) the stripped output equals 0.2's", okc)
+check("end to end: with prompt_cache and NO_COLOR=1 the output equals 0.2's byte for byte", oks)
+_c, _o = run_script(os.path.join(os.path.dirname(HERE), "truegauge.py"),
+                    dict(PAYLOADS3[0], prompt_cache={"caching_observed": True, "warm": False}), {})
+check("end to end: a cold payload really prints an amber context group", (AMB + CTX + RS) in _o.decode("utf-8"), _o)
+_c, _o = run_script(os.path.join(os.path.dirname(HERE), "truegauge.py"),
+                    dict(PAYLOADS3[0], prompt_cache={"caching_observed": True, "warm": False}), {"TRUEGAUGE_MARK": "both"})
+check("end to end: TRUEGAUGE_MARK=both from the environment marks the red windows and the cold context group",
+      _o.decode("utf-8").count(UL) == 3 and SGR_RX.sub("", _o.decode("utf-8")).count("[") == 3, _o)
+check("version is 0.3.0", tg.__version__ == "0.3.0")
 
 print("\n%d failed" % len(fails) if fails else "\nALL PASS")
 sys.exit(1 if fails else 0)
