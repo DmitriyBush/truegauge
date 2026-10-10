@@ -27,6 +27,18 @@ Colors (0.2): a window group (time + percent) turns red when the reading has rea
   (bold red of your terminal theme). The group is wrapped in `ESC[1;..m ... ESC[22;39m`; the space between groups
   is not. NO_COLOR set to anything non-empty: no colour at all (output identical to 0.1).
 
+Cold cache (0.3): the context group (`T548K 55%`, both parts together) turns amber when the main session's prompt
+cache has gone cold. Claude Code's status-line input carries `prompt_cache` (main session only, not subagents):
+cold = `caching_observed` is true AND (`warm` is false OR `expires_at` has passed). No `prompt_cache`, or a value of
+the wrong type, means "not cold" (no data is never shown as cold). On a subscription the main session's cache lives
+1 hour; once usage goes past the plan it is 5 minutes, so amber appears more often. The group of tokens spent in the
+session (`Σ`, subagents included) is NOT coloured: the cache state is known for the main session only.
+TRUEGAUGE_COLD_COLOR: `#rrggbb` (default #ffaf00), `ansi` (bold yellow of your theme) or `off`. The status line also
+keeps the last `prompt_cache` it saw in the state file; `--show` prints it (`cache: ...`).
+Mark without colour (0.3, for people who do not tell colours apart; OFF by default): TRUEGAUGE_MARK = `underline`,
+`brackets` (`[T548K 55%]`) or `both`; `off` / unset = no mark. It is put on the same groups under the same conditions
+as the colours (red window groups, cold context group) and does not depend on colour: NO_COLOR does not remove it.
+
 Honesty rules (the reason this tool exists):
   * A session left idle re-sends its LAST reading. Per window the reading with the larger
     (resets_at, used_percentage) wins; an equal reset with a lower percentage is a replay and is ignored.
@@ -46,7 +58,7 @@ Modes:
                   $CLAUDE_CONFIG_DIR/settings.json. Every write is preceded by a backup copy.)
 Config (environment): TRUEGAUGE_HOME (state dir, default ~/.truegauge), TRUEGAUGE_LANG (en|ru),
   TRUEGAUGE_FABLE (1|0), TRUEGAUGE_PROBE_S, TRUEGAUGE_MAX_AGE_S, TRUEGAUGE_RED_5H, TRUEGAUGE_RED_7D,
-  TRUEGAUGE_RED_COLOR, NO_COLOR.
+  TRUEGAUGE_RED_COLOR, TRUEGAUGE_COLD_COLOR, TRUEGAUGE_MARK, NO_COLOR.
 Stdlib only. License: Apache-2.0.
 """
 import glob
@@ -60,7 +72,7 @@ import sys
 import time
 from datetime import datetime
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 HOME = os.environ.get("TRUEGAUGE_HOME") or os.path.join(os.path.expanduser("~"), ".truegauge")
 STATE = os.path.join(HOME, "state.json")
@@ -700,6 +712,10 @@ RED_VARS = {"five_hour": ("TRUEGAUGE_RED_5H", 98), "seven_day": ("TRUEGAUGE_RED_
 RED_RESET = "\033[22;39m"  # bold off + default foreground only: any other style the terminal had stays
 RED_ANSI = "\033[1;31m"
 RED_DEFAULT_RGB = "#ff0000"
+COLD_DEFAULT_RGB = "#ffaf00"  # amber: the context group when the main session's prompt cache is cold (0.3)
+COLD_ANSI = "\033[1;33m"
+MARKS = ("off", "underline", "brackets", "both")  # TRUEGAUGE_MARK (0.3): a mark that does not need colour
+UL_ON, UL_OFF = "\033[4m", "\033[24m"  # underline on / off (off touches nothing else)
 
 
 def _threshold(raw, default):
@@ -731,9 +747,33 @@ def _sgr(raw):
     return _rgb(RED_DEFAULT_RGB), "%r (#rrggbb or ansi)" % raw
 
 
+def _cold_sgr(raw):
+    """-> (escape sequence | None for off, refusal | None) for TRUEGAUGE_COLD_COLOR. Unset or empty = default, silently."""
+    s = (raw or "").strip()
+    if not s:
+        return _rgb(COLD_DEFAULT_RGB), None
+    if s.lower() in ("off", "0"):
+        return None, None
+    if s.lower() == "ansi":
+        return COLD_ANSI, None
+    if re.fullmatch(r"#[0-9a-fA-F]{6}", s):
+        return _rgb(s), None
+    return _rgb(COLD_DEFAULT_RGB), "%r (#rrggbb, ansi or off)" % raw
+
+
+def _mark(raw):
+    """-> (mark, refusal | None) for TRUEGAUGE_MARK. Unset or empty = off, silently; anything unknown = off + refusal."""
+    s = (raw or "").strip().lower()
+    if not s:
+        return "off", None
+    if s in MARKS:
+        return s, None
+    return "off", "%r (underline, brackets, both or off)" % raw
+
+
 def color_config(environ=None):
     """The colour settings as THIS process sees them: {'no_color': bool, 'th': {window: n | None}, 'sgr': str,
-    'refused': {variable: why}}."""
+    'cold_sgr': str | None, 'mark': str, 'refused': {variable: why}}."""
     env = os.environ if environ is None else environ
     refused, th = {}, {}
     for w, (var, default) in RED_VARS.items():
@@ -743,7 +783,14 @@ def color_config(environ=None):
     sgr, bad = _sgr(env.get("TRUEGAUGE_RED_COLOR"))
     if bad:
         refused["TRUEGAUGE_RED_COLOR"] = bad
-    return {"no_color": bool(env.get("NO_COLOR")), "th": th, "sgr": sgr, "refused": refused}
+    cold_sgr, bad = _cold_sgr(env.get("TRUEGAUGE_COLD_COLOR"))
+    if bad:
+        refused["TRUEGAUGE_COLD_COLOR"] = bad
+    mark, bad = _mark(env.get("TRUEGAUGE_MARK"))
+    if bad:
+        refused["TRUEGAUGE_MARK"] = bad
+    return {"no_color": bool(env.get("NO_COLOR")), "th": th, "sgr": sgr, "cold_sgr": cold_sgr, "mark": mark,
+            "refused": refused}
 
 
 def _reached(v, threshold):
@@ -752,9 +799,35 @@ def _reached(v, threshold):
     return threshold is not None and _pct_int(v["used_percentage"]) >= threshold
 
 
-def render(st, tokens, ctx_pct, lang="en", ctx_tokens=None):
+def _cache_cold(pc, now):
+    """The ONE decision "the main session's prompt cache has gone cold" (the line and --show both use it).
+    Cold = `prompt_cache` is an object, caching_observed is True, and (warm is False OR expires_at is a number
+    that has passed). No data, a wrong type, or caching not observed = not cold: a guess is not shown as a reading.
+    warm that is not a bool is unknown, so it decides nothing; expires_at that is not a number is not judged."""
+    if not isinstance(pc, dict) or pc.get("caching_observed") is not True:
+        return False
+    if pc.get("warm") is False:
+        return True
+    exp = _num(pc.get("expires_at"))
+    return exp is not None and now >= exp
+
+
+def _decorate(group, paint, mark):
+    """Colour and/or mark around one group. Order: colour, underline, [text], underline off, colour reset.
+    paint: the colour sequence or None (no colour); mark: one of MARKS."""
+    if mark in ("brackets", "both"):
+        group = "[" + group + "]"
+    if mark in ("underline", "both"):
+        group = UL_ON + group + UL_OFF
+    if paint:
+        group = paint + group + RED_RESET
+    return group
+
+
+def render(st, tokens, ctx_pct, lang="en", ctx_tokens=None, cold=False):
     """`4h 38% 3d 54% F4% T548K 55% Σ2.6M`: 5-hour window, week, Fable, tokens in the window now, context fill,
-    session total. A group whose data is unknown is left out, never shown as 0."""
+    session total. A group whose data is unknown is left out, never shown as 0. cold: the main session's cache has
+    gone cold (see _cache_cold) -- the context group is drawn amber."""
     w = WORDS.get(lang, WORDS["en"])
     try:
         cc = color_config()
@@ -769,10 +842,10 @@ def render(st, tokens, ctx_pct, lang="en", ctx_tokens=None):
         if not v or v["status"] not in ("fresh", "stale_reading"):
             continue
         group = "%s %s" % (fmt_left(v["resets_in_s"], w, days_only=(key == "seven_day")), _used(v))
-        if cc is not None and not cc["no_color"]:
+        if cc is not None:
             try:
                 if _reached(v, cc["th"][key]):
-                    group = cc["sgr"] + group + RED_RESET
+                    group = _decorate(group, None if cc["no_color"] else cc["sgr"], cc["mark"])
             except Exception as e:  # SF4 paint: the group stays without colour
                 _record_error("colour paint: %s: %s" % (type(e).__name__, e))
         parts.append(group)
@@ -781,10 +854,19 @@ def render(st, tokens, ctx_pct, lang="en", ctx_tokens=None):
         parts.append("F" + _used(fb))
     ct = _num(ctx_tokens)
     no_reading = ct is not None and ct <= 0  # Claude Code sends 0 before the first reply and after /compact: no reading, not an empty window
+    ctx = []
     if ct is not None and not no_reading:
-        parts.append(w["T"] + fmt_tokens(ct, w))
+        ctx.append(w["T"] + fmt_tokens(ct, w))
     if ctx_pct is not None and not no_reading:  # a fill with 0 tokens is not from a real reading either
-        parts.append("%d%%" % _half_up(ctx_pct))
+        ctx.append("%d%%" % _half_up(ctx_pct))
+    group = " ".join(ctx)
+    if group and cold and cc is not None:  # nothing to paint when there is no reading
+        try:
+            group = _decorate(group, None if cc["no_color"] else cc["cold_sgr"], cc["mark"])
+        except Exception as e:  # SF4 cold paint: the group stays without colour
+            _record_error("cold paint: %s: %s" % (type(e).__name__, e))
+    if group:
+        parts.append(group)
     if tokens is not None:
         parts.append("%s%s%s" % (SIGMA, "" if tokens.get("complete", True) else GE, fmt_tokens(tokens["new"], w, down=not tokens.get("complete", True))))
     return " ".join(parts)
@@ -794,7 +876,8 @@ def _remember_render_cfg(cc, now):
     """Keep the colour settings the status line ACTUALLY used (its `env` block in settings.json is invisible to a
     shell, so --show cannot recompute them). Written only when they differ from the saved ones: the line runs often.
     A new non-empty refusal is recorded as an error, once per change."""
-    cfg = {"th": dict(cc["th"]), "sgr": cc["sgr"], "no_color": bool(cc["no_color"]), "refused": dict(cc["refused"])}
+    cfg = {"th": dict(cc["th"]), "sgr": cc["sgr"], "cold_sgr": cc["cold_sgr"], "mark": cc["mark"],
+           "no_color": bool(cc["no_color"]), "refused": dict(cc["refused"])}
     with _Lock():
         d, problem = _read()
         if problem not in (None, "missing"):
@@ -811,6 +894,40 @@ def _remember_render_cfg(cc, now):
                       % "; ".join("%s=%s" % kv for kv in sorted(cfg["refused"].items())))
 
 
+def _pc_value(v):
+    """One field of prompt_cache for the record: simple values as they are (the type is the evidence), anything else
+    as its type name, long text cut."""
+    if v is None or isinstance(v, (bool, int)):
+        return v
+    if isinstance(v, float):
+        return v if _num(v) is not None else "<float nan/inf>"
+    if isinstance(v, str):
+        return v[:32]
+    return "<%s>" % type(v).__name__
+
+
+PC_FIELDS = ("warm", "caching_observed", "ttl", "expires_at", "recache_tokens_if_cold")
+
+
+def _remember_cache(payload, now):
+    """Instrument for the first-hand check of the input: keep the LAST `prompt_cache` the status line saw, compactly
+    (`present` False when there is no object). Written only when it differs from the saved one (not counting
+    seen_at): the line runs often, and expires_at moves only with a new reply."""
+    pc = payload.get("prompt_cache") if isinstance(payload, dict) else None
+    rec = {"present": isinstance(pc, dict)}
+    for k in PC_FIELDS:
+        rec[k] = _pc_value(pc.get(k)) if isinstance(pc, dict) else None
+    with _Lock():
+        d, problem = _read()
+        if problem not in (None, "missing"):
+            return
+        old = d.get("prompt_cache_seen")
+        if isinstance(old, dict) and {k: v for k, v in old.items() if k != "seen_at"} == rec:
+            return
+        d["prompt_cache_seen"] = dict(rec, seen_at=int(now))
+        _save(d)
+
+
 def _saved_render_cfg(d):
     """-> (cfg, at) from the state dict, or (None, None) when absent or not of the expected shape."""
     c = d.get("render_cfg")
@@ -818,8 +935,10 @@ def _saved_render_cfg(d):
         ok = (isinstance(c, dict) and isinstance(c["sgr"], str) and isinstance(c["no_color"], bool)
               and isinstance(c["refused"], dict) and isinstance(c["th"], dict)
               and all(c["th"].get(k) is None or isinstance(c["th"][k], int) for k in RED_VARS)
-              and all(k in c["th"] for k in RED_VARS))
-    except KeyError:
+              and all(k in c["th"] for k in RED_VARS)
+              # 0.3 keys: absent in a record written by 0.2 (then --show says nothing about them), wrong shape = damaged
+              and (c.get("cold_sgr") is None or isinstance(c["cold_sgr"], str)) and c.get("mark", "off") in MARKS)
+    except (KeyError, TypeError):
         ok = False
     return (c, _num(d.get("render_cfg_at"))) if ok else (None, None)
 
@@ -840,15 +959,52 @@ def statusline(payload, now=None):
         _remember_render_cfg(color_config(), now)
     except Exception as e:  # an extra; its failure must not cost the main line
         _record_error("colour settings: %s: %s" % (type(e).__name__, e))
+    try:
+        _remember_cache(payload, now)
+    except Exception as e:  # an extra (the measuring instrument); its failure must not cost the main line
+        _record_error("cache record: %s: %s" % (type(e).__name__, e))
+    try:
+        cold = _cache_cold(payload.get("prompt_cache"), now)
+    except Exception as e:  # SF4 cold test: no colour, the line stays
+        _record_error("cold test: %s: %s" % (type(e).__name__, e))
+        cold = False
     st = read_state(now)
     cw = payload.get("context_window")
     ctx = _num(cw.get("used_percentage")) if isinstance(cw, dict) else None
     cti = _num(cw.get("total_input_tokens")) if isinstance(cw, dict) else None
-    return render(st, tokens, ctx, os.environ.get("TRUEGAUGE_LANG", "en"), cti)
+    return render(st, tokens, ctx, os.environ.get("TRUEGAUGE_LANG", "en"), cti, cold)
 
 
 def _th_name(n):
     return "off" if n is None else str(n)
+
+
+def _show_cache(d, now=None):
+    """The `cache:` line: what the status line last saw as prompt_cache, and whether that reads as cold now."""
+    now = time.time() if now is None else now
+    rec = d.get("prompt_cache_seen")
+    if rec is None:
+        print("cache: no record yet")
+        return
+    if not isinstance(rec, dict) or _num(rec.get("seen_at")) is None or not isinstance(rec.get("present"), bool):
+        print("cache: the record is damaged; the status line rewrites it on its next call")
+        return
+    at = datetime.fromtimestamp(rec["seen_at"]).strftime("%Y-%m-%d %H:%M:%S")
+    if not rec["present"]:
+        print("cache: as the status line saw it at %s: present=False (no prompt_cache in its input), cold now: no" % at)
+        return
+    exp = _num(rec.get("expires_at"))
+    if exp is None:
+        when = "expires_at=%r" % (rec.get("expires_at"),)
+    elif now >= exp:
+        when = "expired %d s ago" % int(now - exp)
+    else:
+        when = "expires in %d s" % int(exp - now)
+    cold = _cache_cold(rec, now)
+    print("cache: as the status line saw it at %s: present=True, caching_observed=%r, warm=%r, ttl=%r, %s, "
+          "recache_if_cold=%r, cold now: %s"
+          % (at, rec.get("caching_observed"), rec.get("warm"), rec.get("ttl"), when,
+             rec.get("recache_tokens_if_cold"), "yes" if cold else "no"))
 
 
 def show():
@@ -868,6 +1024,7 @@ def show():
              "; NO_COLOR is set: no colour" if cc["no_color"] else "",
              "; REFUSED (default used): %s" % "; ".join("%s=%s" % kv for kv in sorted(cc["refused"].items()))
              if cc["refused"] else ""))
+    print("cold colour: %s; mark: %s" % ("off" if cc["cold_sgr"] is None else cc["cold_sgr"].replace("\033", "ESC"), cc["mark"]))
     print("colour: values of THIS shell; an `env` block in settings.json is seen only by the status line itself")
     if rc is None:
         print("status line colour: unknown (the status line has not recorded its colour settings yet)")
@@ -878,6 +1035,10 @@ def show():
                  "; REFUSED (default used): %s" % "; ".join("%s=%s" % kv for kv in sorted(rc["refused"].items()))
                  if rc["refused"] else "",
                  "?" if rc_at is None else datetime.fromtimestamp(rc_at).strftime("%Y-%m-%d %H:%M:%S")))
+    if rc is not None and "mark" in rc:
+        print("status line cold colour: %s; mark: %s"
+              % ("off" if rc.get("cold_sgr") is None else rc["cold_sgr"].replace("\033", "ESC"), rc["mark"]))
+    _show_cache(d)
     judge = rc  # the status line's own settings: the shell's differ whenever `env` in settings.json is used
     for key in WINDOWS + ("fable",):
         v = st.get(key)
