@@ -1,6 +1,6 @@
 """Question: does the test suite go red when a guarded behaviour is broken? Each mutant edits a COPY of
 truegauge.py in a temp dir and runs the suite against it. CAUGHT = suite red, SLIPPED = suite green (a hole).
-Run: python tests/mutants.py [--jobs N]   (N parallel suite runs; the first run is a control on an unmutated copy)"""
+Run: python tests/mutants.py [--jobs N] [--from A --to B]   (N parallel suite runs; the first run is a control on an unmutated copy)"""
 import concurrent.futures
 import glob
 import os
@@ -191,6 +191,9 @@ MUTANTS = [
 src = open(SRC, encoding="utf-8").read()
 TEST_SRC = open(os.path.join(HERE, "test_truegauge.py"), encoding="utf-8").read()
 JOBS = int(sys.argv[sys.argv.index("--jobs") + 1]) if "--jobs" in sys.argv else 1  # parallel runs; 1 = one by one
+FROM = int(sys.argv[sys.argv.index("--from") + 1]) if "--from" in sys.argv else 0  # a partial run: MUTANTS[FROM:TO]
+TO = int(sys.argv[sys.argv.index("--to") + 1]) if "--to" in sys.argv else len(MUTANTS)
+PART = MUTANTS[FROM:TO]
 
 
 def run_one(m):
@@ -219,8 +222,9 @@ if _status != "SLIPPED ":
 print("control: unmutated copy is green", flush=True)
 slipped = 0
 with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, JOBS)) as pool:
-    for status, name in pool.map(run_one, MUTANTS):  # results come back in list order
+    for status, name in pool.map(run_one, PART):  # results come back in list order
         slipped += 0 if status == "CAUGHT " else 1
         print(status + name, flush=True)
-print("\n%d of %d caught" % (len(MUTANTS) - slipped, len(MUTANTS)))
+print("\n%d of %d caught%s" % (len(PART) - slipped, len(PART),
+                             "" if len(PART) == len(MUTANTS) else " (PARTIAL run: mutants %d..%d of %d)" % (FROM, TO - 1, len(MUTANTS))))
 sys.exit(1 if slipped else 0)
