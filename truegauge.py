@@ -28,13 +28,13 @@ Colors (0.2): a window group (time + percent) turns red when the reading has rea
   is not. NO_COLOR set to anything non-empty: no colour at all (output identical to 0.1, except for a mark set by
   TRUEGAUGE_MARK, which NO_COLOR does not remove).
 
-Cold cache (0.3): the context group (`T548K 55%`, both parts together) turns amber when the main session's prompt
+Cold cache (0.3): the context group (`T548K 55%`, both parts together) turns blue when the main session's prompt
 cache has gone cold. Claude Code's status-line input carries `prompt_cache` (main session only, not subagents):
 cold = `caching_observed` is true AND (`warm` is false OR `expires_at` has passed). No `prompt_cache`, or a value of
 the wrong type, means "not cold" (no data is never shown as cold). On a subscription the main session's cache lives
-1 hour; once usage goes past the plan it is 5 minutes, so amber appears more often. The group of tokens spent in the
+1 hour; once usage goes past the plan it is 5 minutes, so blue appears more often. The group of tokens spent in the
 session (`Σ`, subagents included) is NOT coloured: the cache state is known for the main session only.
-TRUEGAUGE_COLD_COLOR: `#rrggbb` (default #ffaf00), `ansi` (bold yellow of your theme) or `off`. The status line also
+TRUEGAUGE_COLD_COLOR: `#rrggbb` (default #b1b9f9), `ansi` (bold bright blue of your theme) or `off`. The status line also
 keeps the last `prompt_cache` it saw in the state file; `--show` prints it (`cache: ...`).
 Mark without colour (0.3, for people who do not tell colours apart; OFF by default): TRUEGAUGE_MARK = a comma-separated list of
 `underline`, `braces` (`{T548K 55%}`) and `bold`, or `all` (all three), or `off` / unset = no mark. One unknown item
@@ -725,8 +725,8 @@ RED_VARS = {"five_hour": ("TRUEGAUGE_RED_5H", 98), "seven_day": ("TRUEGAUGE_RED_
 RED_RESET = "\033[22;39m"  # bold off + default foreground only: any other style the terminal had stays
 RED_ANSI = "\033[1;31m"
 RED_DEFAULT_RGB = "#ff0000"
-COLD_DEFAULT_RGB = "#ffaf00"  # amber: the context group when the main session's prompt cache is cold (0.3)
-COLD_ANSI = "\033[1;33m"
+COLD_DEFAULT_RGB = "#b1b9f9"  # blue of Claude Code's own "/clear to save" hint (theme key suggestion, dark theme): the context group when the main session's prompt cache is cold (0.3)
+COLD_ANSI = "\033[1;94m"
 MARK_ITEMS = ("underline", "braces", "bold")  # TRUEGAUGE_MARK (0.3): marks that do not need colour; canonical order
 UL_ON, UL_OFF = "\033[4m", "\033[24m"  # underline on / off (off touches nothing else)
 BOLD_ON, BOLD_OFF = "\033[1m", "\033[22m"  # bold on / off (off touches nothing else)
@@ -889,7 +889,7 @@ def _decorate(group, paint, mark):
 def render(st, tokens, ctx_pct, lang="en", ctx_tokens=None, cold=False, ctx_last=None):
     """`4h 38% 3d 54% F4% T548K 55% Σ2.6M`: 5-hour window, week, Fable, tokens in the window now, context fill,
     session total. A group whose data is unknown is left out, never shown as 0. cold: the main session's cache has
-    gone cold (see _cache_cold) -- the context group is drawn amber. ctx_last: the saved reading of THIS session (see
+    gone cold (see _cache_cold) -- the context group is drawn blue. ctx_last: the saved reading of THIS session (see
     _stale_context); used only when Claude Code sends no reading now, drawn with `<=` (an upper bound)."""
     w = WORDS.get(lang, WORDS["en"])
     try:

@@ -1238,15 +1238,15 @@ for var in ("TRUEGAUGE_RED_5H", "TRUEGAUGE_RED_7D", "TRUEGAUGE_RED_COLOR"):
             ok = g5(97.5) == red_of("2h 98%") and g7(98.5) == red_of("3d 99%") and g5(97.49) == "2h 97%"
         check("CR2: %s=%r (spaces only) = not set: default, --show silent" % (var, blank), ok and "REFUSED" not in out, out)
 
-# ======================================================================== 0.3: amber context group when the main session's cache is cold
+# ======================================================================== 0.3: blue context group when the main session's cache is cold
 # (table of boundaries: 01_PROEKT.md section 2; now = 1000000)
-AMB = "\033[1;38;2;255;175;0m"
+AMB = "\033[1;38;2;177;185;249m"
 UL, ULX = "\033[4m", "\033[24m"
 CNOW = 1_800_000_000  # a plausible epoch: expires_at outside CACHE_EPOCH_MIN..MAX is "unknown" (item 6)
 CTX = "T548K 55%"
 
 
-def amber(text):
+def blue(text):
     return AMB + text + RS
 
 
@@ -1273,25 +1273,25 @@ with envset():
     for what, pc in (("null", None), ("a list", []), ("a string", "cold"), ("a number", 5), ("true", True)):
         check("cold: prompt_cache = %s -> plain" % what, ctxline(pc) == CTX and cold_of(pc) is False, ctxline(pc))
     check("cold: observed, warm, expires_at = now+1 -> plain", ctxline(PC(exp=CNOW + 1)) == CTX)
-    check("cold: observed, warm, expires_at = now -> AMBER (the moment it cools)", ctxline(PC(exp=CNOW)) == amber(CTX), ctxline(PC(exp=CNOW)))
-    check("cold: observed, warm, expires_at = now-1 -> AMBER", ctxline(PC(exp=CNOW - 1)) == amber(CTX), ctxline(PC(exp=CNOW - 1)))
-    check("cold: observed, warm=false, expires_at=null -> AMBER", ctxline(PC(warm=False, exp=None)) == amber(CTX))
-    check("cold: observed, warm=false, expires_at=now+3600 -> AMBER (warm wins over a future time)",
-          ctxline(PC(warm=False, exp=CNOW + 3600)) == amber(CTX))
+    check("cold: observed, warm, expires_at = now -> BLUE (the moment it cools)", ctxline(PC(exp=CNOW)) == blue(CTX), ctxline(PC(exp=CNOW)))
+    check("cold: observed, warm, expires_at = now-1 -> BLUE", ctxline(PC(exp=CNOW - 1)) == blue(CTX), ctxline(PC(exp=CNOW - 1)))
+    check("cold: observed, warm=false, expires_at=null -> BLUE", ctxline(PC(warm=False, exp=None)) == blue(CTX))
+    check("cold: observed, warm=false, expires_at=now+3600 -> BLUE (warm wins over a future time)",
+          ctxline(PC(warm=False, exp=CNOW + 3600)) == blue(CTX))
     check("cold: observed=false, warm=false -> plain (nothing was cached, nothing cooled)", ctxline(PC(observed=False, warm=False)) == CTX)
     check("cold: observed missing, warm=false -> plain", ctxline(PC(observed=ABSENT, warm=False)) == CTX)
     check("cold: observed='true' (a string), warm=false -> plain", ctxline(PC(observed="true", warm=False)) == CTX)
     check("cold: observed=1 (a number), warm=false -> plain", ctxline(PC(observed=1, warm=False)) == CTX)
     check("cold: observed=true, warm='false' (a string), expires_at=now+10 -> plain", ctxline(PC(warm="false", exp=CNOW + 10)) == CTX)
-    check("cold: observed=true, warm='false', expires_at=now-10 -> AMBER (by the time)", ctxline(PC(warm="false", exp=CNOW - 10)) == amber(CTX))
-    check("cold: warm=0 (a number, not False) with a past time -> by the time only", ctxline(PC(warm=0, exp=CNOW - 10)) == amber(CTX)
+    check("cold: observed=true, warm='false', expires_at=now-10 -> BLUE (by the time)", ctxline(PC(warm="false", exp=CNOW - 10)) == blue(CTX))
+    check("cold: warm=0 (a number, not False) with a past time -> by the time only", ctxline(PC(warm=0, exp=CNOW - 10)) == blue(CTX)
           and ctxline(PC(warm=0, exp=CNOW + 10)) == CTX)
     check("cold: observed, warm=true, expires_at=null -> plain", ctxline(PC(exp=None)) == CTX)
-    check("cold: warm absent, expires_at in the past -> AMBER", ctxline(PC(warm=ABSENT, exp=CNOW - 1)) == amber(CTX))
+    check("cold: warm absent, expires_at in the past -> BLUE", ctxline(PC(warm=ABSENT, exp=CNOW - 1)) == blue(CTX))
     check("cold: warm absent, expires_at absent -> plain", ctxline(PC(warm=ABSENT, exp=ABSENT)) == CTX)
     for bad in ("1000", "999999", True, False, [1], {"a": 1}, float("nan"), float("inf"), float("-inf")):
         check("cold: observed, warm=true, expires_at=%r -> plain (not a number, not judged)" % (bad,), ctxline(PC(exp=bad)) == CTX)
-    check("cold: expires_at as a float in the past -> AMBER", ctxline(PC(exp=CNOW - 0.5)) == amber(CTX))
+    check("cold: expires_at as a float in the past -> BLUE", ctxline(PC(exp=CNOW - 0.5)) == blue(CTX))
 
     # ---- what is painted (rule 1)
     check("cold, no T and no percent (0 tokens) -> nothing painted, line empty",
@@ -1301,20 +1301,20 @@ with envset():
     base = tg.render({"five_hour": win("fresh", 38, 14400)}, {"new": 2600000, "complete": True}, None, "en", 0, cold=False)
     check("cold, no reading: the line equals the line with a warm cache",
           tg.render({"five_hour": win("fresh", 38, 14400)}, {"new": 2600000, "complete": True}, None, "en", 0, cold=True) == base, base)
-    check("cold, only a percent (no T) -> only the percent is painted", tg.render({}, None, 55.2, "en", None, cold=True) == amber("55%"))
-    check("cold, only T (no percent) -> only T is painted", tg.render({}, None, None, "en", 548200, cold=True) == amber("T548K"))
+    check("cold, only a percent (no T) -> only the percent is painted", tg.render({}, None, 55.2, "en", None, cold=True) == blue("55%"))
+    check("cold, only T (no percent) -> only T is painted", tg.render({}, None, None, "en", 548200, cold=True) == blue("T548K"))
     check("cold, both -> one sequence around both with the space inside",
           tg.render({}, None, 55.2, "en", 548200, cold=True) == AMB + "T548K 55%" + RS)
     full = tg.render({"five_hour": win("fresh", 98.2, 7200), "fable": win("fresh", 4, None)},
                      {"new": 2600000, "complete": True}, 55.2, "en", 548200, cold=True)
-    check("cold + 5h past the red threshold: 5h red, context amber, plain spaces between, F and Σ without colour",
-          full == red_of("2h 98%") + " F4% " + amber(CTX) + " Σ2.6M", full)
+    check("cold + 5h past the red threshold: 5h red, context blue, plain spaces between, F and Σ without colour",
+          full == red_of("2h 98%") + " F4% " + blue(CTX) + " Σ2.6M", full)
     check("cold: Σ is never painted (2 sequences starts, 2 resets)", full.count("\x1b[1;38") == 2 and full.count(RS) == 2, full)
     full_ru = tg.render({}, {"new": 2600000, "complete": True}, 55.2, "ru", 548200, cold=True)
-    check("cold, ru words: amber around Т548К 55%, Σ outside", full_ru == amber("Т548К 55%") + " Σ2.6М", full_ru)
+    check("cold, ru words: blue around Т548К 55%, Σ outside", full_ru == blue("Т548К 55%") + " Σ2.6М", full_ru)
     check("cold group sits between Fable and Σ (order of groups unchanged)",
           full.index("F4%") < full.index(AMB) < full.index("Σ"))
-    check("a warm cache: the full line has no amber at all",
+    check("a warm cache: the full line has no blue at all",
           AMB not in tg.render({"five_hour": win("fresh", 98.2, 7200)}, {"new": 2600000, "complete": True}, 55.2, "en", 548200, cold=False))
 
 with envset(NO_COLOR="1"):
@@ -1330,12 +1330,12 @@ for off in ("off", "OFF", "Off", "0", " off "):
     out = shown({"TRUEGAUGE_COLD_COLOR": off})
     check("TRUEGAUGE_COLD_COLOR=%r -> --show says off, not a refusal" % off, "cold colour: off" in out and "REFUSED" not in out, out)
 with envset(TRUEGAUGE_COLD_COLOR="ansi"):
-    check("TRUEGAUGE_COLD_COLOR=ansi -> bold yellow", tg.render({}, None, 55.2, "en", 548200, cold=True) == "\033[1;33m" + CTX + RS)
+    check("TRUEGAUGE_COLD_COLOR=ansi -> bold bright blue", tg.render({}, None, 55.2, "en", 548200, cold=True) == "\033[1;94m" + CTX + RS)
 with envset(TRUEGAUGE_COLD_COLOR="ANSI"):
-    check("TRUEGAUGE_COLD_COLOR=ANSI -> bold yellow", tg.render({}, None, 55.2, "en", 548200, cold=True) == "\033[1;33m" + CTX + RS)
-for val in ("#FFAF00", "#ffaf00", " #ffaf00 "):
+    check("TRUEGAUGE_COLD_COLOR=ANSI -> bold bright blue", tg.render({}, None, 55.2, "en", 548200, cold=True) == "\033[1;94m" + CTX + RS)
+for val in ("#B1B9F9", "#b1b9f9", " #b1b9f9 "):
     with envset(TRUEGAUGE_COLD_COLOR=val):
-        check("TRUEGAUGE_COLD_COLOR=%r -> accepted (amber)" % val, tg.render({}, None, 55.2, "en", 548200, cold=True) == amber(CTX))
+        check("TRUEGAUGE_COLD_COLOR=%r -> accepted (blue)" % val, tg.render({}, None, 55.2, "en", 548200, cold=True) == blue(CTX))
     check("TRUEGAUGE_COLD_COLOR=%r -> --show silent" % val, "REFUSED" not in shown({"TRUEGAUGE_COLD_COLOR": val}))
 with envset(TRUEGAUGE_COLD_COLOR="#00ff7f"):
     check("TRUEGAUGE_COLD_COLOR=#00ff7f -> that colour, bold",
@@ -1344,22 +1344,22 @@ for val in ("yellow", "#ffa", "#gg0000", "#ffaf000", "ffaf00", "33", "of"):
     with envset(TRUEGAUGE_COLD_COLOR=val):
         got = tg.render({}, None, 55.2, "en", 548200, cold=True)
     out = shown({"TRUEGAUGE_COLD_COLOR": val})
-    check("TRUEGAUGE_COLD_COLOR=%r -> default amber used" % val, got == amber(CTX), got)
+    check("TRUEGAUGE_COLD_COLOR=%r -> default blue used" % val, got == blue(CTX), got)
     check("TRUEGAUGE_COLD_COLOR=%r -> --show names the refusal" % val, "REFUSED" in out and "TRUEGAUGE_COLD_COLOR" in out, out)
 for blank in ("", "  ", "\t"):
     with envset(TRUEGAUGE_COLD_COLOR=blank):
         got = tg.render({}, None, 55.2, "en", 548200, cold=True)
-    check("TRUEGAUGE_COLD_COLOR=%r -> default amber, --show silent" % blank,
-          got == amber(CTX) and "REFUSED" not in shown({"TRUEGAUGE_COLD_COLOR": blank}), got)
+    check("TRUEGAUGE_COLD_COLOR=%r -> default blue, --show silent" % blank,
+          got == blue(CTX) and "REFUSED" not in shown({"TRUEGAUGE_COLD_COLOR": blank}), got)
 with envset(TRUEGAUGE_RED_5H="off"):
     got = tg.render({"five_hour": win("fresh", 100, 7200)}, None, 55.2, "en", 548200, cold=True)
-    check("red threshold off + cold: no red, amber present (settings are independent)", got == "2h 100% " + amber(CTX), got)
+    check("red threshold off + cold: no red, blue present (settings are independent)", got == "2h 100% " + blue(CTX), got)
 with envset(TRUEGAUGE_COLD_COLOR="off"):
     got = tg.render({"five_hour": win("fresh", 100, 7200)}, None, 55.2, "en", 548200, cold=True)
     check("cold colour off + red window: red stays (settings are independent)", got == red_of("2h 100%") + " " + CTX, got)
 with envset(TRUEGAUGE_RED_COLOR="ansi"):
     got = tg.render({"five_hour": win("fresh", 100, 7200)}, None, 55.2, "en", 548200, cold=True)
-    check("red colour setting does not change the amber one", got == "\033[1;31m2h 100%" + RS + " " + amber(CTX), got)
+    check("red colour setting does not change the blue one", got == "\033[1;31m2h 100%" + RS + " " + blue(CTX), got)
 
 # ---- the mark without colour (rule 8a): TRUEGAUGE_MARK = list of underline, braces, bold | all | off
 BO, BOX = "\033[1m", "\033[22m"  # bold on / bold off (no colour in the line)
@@ -1369,7 +1369,7 @@ with envset():
     tk = {"new": 2600000, "complete": True}
     plain_all = tg.render(both_w, tk, 55.2, "en", 548200, cold=True)
     check("mark: unset -> no mark anywhere, line is the colour-only line",
-          plain_all == red_of("2h 98%") + " " + red_of("3d 100%") + " F100% " + amber(CTX) + " Σ2.6M" and "{" not in plain_all and UL not in plain_all and BO not in plain_all, plain_all)
+          plain_all == red_of("2h 98%") + " " + red_of("3d 100%") + " F100% " + blue(CTX) + " Σ2.6M" and "{" not in plain_all and UL not in plain_all and BO not in plain_all, plain_all)
 with envset(TRUEGAUGE_MARK=""):
     check("mark: empty -> off, silently", tg.render(both_w, tk, 55.2, "en", 548200, cold=True) == plain_all
           and "REFUSED" not in shown({"TRUEGAUGE_MARK": ""}))
@@ -1379,12 +1379,12 @@ with envset(TRUEGAUGE_MARK="underline"):
     check("mark=underline, 5h past the threshold: colour, underline on, text, underline off, colour reset",
           got == RED + UL + "2h 98%" + ULX + RS, got)
     got = tg.render({}, None, 55.2, "en", 548200, cold=True)
-    check("mark=underline, cold: amber, underline around the whole context group",
+    check("mark=underline, cold: blue, underline around the whole context group",
           got == AMB + UL + CTX + ULX + RS, got)
     check("mark=underline: a group not past the threshold has no mark", tg.render({"five_hour": win("fresh", 38, 7200)}, None, None, "en", None) == "2h 38%")
 with envset(TRUEGAUGE_MARK="braces"):
     got = tg.render({}, None, 55.2, "en", 548200, cold=True)
-    check("mark=braces, cold: {T548K 55%} inside the amber", got == AMB + "{" + CTX + "}" + RS, got)
+    check("mark=braces, cold: {T548K 55%} inside the blue", got == AMB + "{" + CTX + "}" + RS, got)
     got = tg.render(five, None, None, "en", None)
     check("mark=braces, 5h red: {2h 98%} inside the red, no underline, no square bracket",
           got == RED + "{2h 98%}" + RS and UL not in got and "[" not in SGR_RX.sub("", got) and "]" not in got, got)
@@ -1393,7 +1393,7 @@ with envset(TRUEGAUGE_MARK="bold"):
     check("mark=bold + colour: the colour already carries bold -> line equals the colour-only line (bold not doubled)",
           got == RED + "2h 98%" + RS and BO not in got and BOX not in got, got)
     got = tg.render({}, None, 55.2, "en", 548200, cold=True)
-    check("mark=bold + colour, cold: amber only, bold not doubled", got == AMB + CTX + RS and BO not in got, got)
+    check("mark=bold + colour, cold: blue only, bold not doubled", got == AMB + CTX + RS and BO not in got, got)
 # pairs (with colour); order of the list does not matter
 with envset(TRUEGAUGE_MARK="underline,braces"):
     check("mark=underline,braces + colour: colour, underline, {text}, underline off, reset",
@@ -1497,11 +1497,11 @@ check("_mark_valid: canonical lists and off pass; 'brackets' / 'both' / '' / non
 
 # ---- --show: cold colour, mark, cache record
 out = shown({"TRUEGAUGE_MARK": "all", "TRUEGAUGE_COLD_COLOR": "ansi"})
-check("--show: the mark line (this shell)", "mark: underline,braces,bold" in out and "cold colour: ESC[1;33m" in out, out)
+check("--show: the mark line (this shell)", "mark: underline,braces,bold" in out and "cold colour: ESC[1;94m" in out, out)
 out = shown({"TRUEGAUGE_MARK": " Bold, underline "})
 check("--show: the mark line shows the canonical list", "mark: underline,bold" in out, out)
 out = shown({})
-check("--show: defaults are amber and mark off", "cold colour: ESC[1;38;2;255;175;0m; mark: off" in out, out)
+check("--show: defaults are blue and mark off", "cold colour: ESC[1;38;2;177;185;249m; mark: off" in out, out)
 fresh()
 _n = time.time()
 tg.update(rl(five=(97.6, int(_n) + 7200)), _n)
@@ -1510,7 +1510,7 @@ with envset(TRUEGAUGE_MARK="underline"):
     tg._remember_render_cfg(tg.color_config(), _n)
     out = cli("--show")[1]
 check("--show: the status line's own mark and cold colour are shown with its settings",
-      "status line cold colour: ESC[1;38;2;255;175;0m; mark: underline" in out, out)
+      "status line cold colour: ESC[1;38;2;177;185;249m; mark: underline" in out, out)
 _cfg0 = {"th": {"five_hour": 98, "seven_day": 99}, "sgr": RED, "no_color": False, "refused": {}, "cold_sgr": AMB}
 for _m, _ok in (("off", True), ("underline,bold", True), ("underline,braces,bold", True), ("brackets", False), ("both", False), ("bold,box", False), ("", False), (5, False)):
     _got = tg._saved_render_cfg({"render_cfg": dict(_cfg0, mark=_m), "render_cfg_at": 5})[0]
@@ -1595,17 +1595,17 @@ check("--show: a damaged cache record is named, --show does not crash", "cache: 
 fresh()
 _n = 1_700_000_000.0
 out1 = sl_pc(dict(pcx, expires_at=int(_n) - 1), _n)
-check("statusline: expires_at one second before `now` -> amber context group", AMB + CTX + RS in out1, out1)
+check("statusline: expires_at one second before `now` -> blue context group", AMB + CTX + RS in out1, out1)
 fresh()
 out2 = sl_pc(dict(pcx, expires_at=int(_n) + 1), _n)
-check("statusline: expires_at one second after `now` -> no amber", AMB not in out2 and CTX in out2, out2)
+check("statusline: expires_at one second after `now` -> no blue", AMB not in out2 and CTX in out2, out2)
 fresh()
 out3 = sl_pc(dict(pcx, warm=False), _n)
-check("statusline: warm=false -> amber", AMB + CTX + RS in out3, out3)
+check("statusline: warm=false -> blue", AMB + CTX + RS in out3, out3)
 fresh()
 out4 = sl_pc(ABSENT, _n)
-check("statusline: no prompt_cache -> no amber", AMB not in out4 and CTX in out4, out4)
-check("statusline: amber is the only difference between cold and warm lines", SGR_RX.sub("", out1) == SGR_RX.sub("", out2) == SGR_RX.sub("", out4))
+check("statusline: no prompt_cache -> no blue", AMB not in out4 and CTX in out4, out4)
+check("statusline: blue is the only difference between cold and warm lines", SGR_RX.sub("", out1) == SGR_RX.sub("", out2) == SGR_RX.sub("", out4))
 
 # SF4 for the new code: a fault costs the colour or the record, never the line
 fresh()
@@ -1633,7 +1633,7 @@ try:
     line = sl_pc(dict(pcx, warm=False), _n)
 finally:
     tg._cache_cold = orig
-check("SF4 (0.3): the cold test failing means not cold (no amber, no error escape)", AMB not in line and CTX in line, line)
+check("SF4 (0.3): the cold test failing means not cold (no blue, no error escape)", AMB not in line and CTX in line, line)
 
 # ---- 0.3 lens findings (order 20, 2026-10-10): every check carries its finding number
 def sl_sid(pc, now, sid, env=None):
@@ -1699,9 +1699,9 @@ check("finding 6: the reason for a string names the type", "type str" in tg._exp
 _ms = 1_791_600_000_000  # 2026-10-10 in milliseconds
 fresh()
 with envset():
-    check("finding 6: expires_at in MILLISECONDS (past) -> not cold, not amber", ctxline(PC(exp=_ms), now=1_800_000_000) == CTX)
-    check("finding 6: warm=false still wins when expires_at is in milliseconds", ctxline(PC(warm=False, exp=_ms), now=1_800_000_000) == amber(CTX))
-    check("finding 6: expires_at as an ISO string -> not judged, not amber", ctxline(PC(exp="2026-01-01T00:00:00Z"), now=1_800_000_000) == CTX)
+    check("finding 6: expires_at in MILLISECONDS (past) -> not cold, not blue", ctxline(PC(exp=_ms), now=1_800_000_000) == CTX)
+    check("finding 6: warm=false still wins when expires_at is in milliseconds", ctxline(PC(warm=False, exp=_ms), now=1_800_000_000) == blue(CTX))
+    check("finding 6: expires_at as an ISO string -> not judged, not blue", ctxline(PC(exp="2026-01-01T00:00:00Z"), now=1_800_000_000) == CTX)
 
 # finding 4: cold now is yes / no / unknown (reason)
 _N = 1_800_000_000
@@ -2017,9 +2017,9 @@ def test_state_survives_compaction_show_and_cold():
     fresh()
     t4_call(548200, 55.2, n)
     out = t4_call(0, 0, n + 10, prompt_cache={"caching_observed": True, "warm": False})
-    check("T4 the stale group is painted amber when the cache is cold", amber(T4_STALE) in out, out)
+    check("T4 the stale group is painted blue when the cache is cold", blue(T4_STALE) in out, out)
     out = t4_call(0, 0, n + 11, prompt_cache={"caching_observed": True, "warm": True, "expires_at": n + 3000})
-    check("T4 the stale group is plain when the cache is warm", amber(T4_STALE) not in out and T4_STALE in out, out)
+    check("T4 the stale group is plain when the cache is warm", blue(T4_STALE) not in out and T4_STALE in out, out)
     with envset(TRUEGAUGE_MARK="braces"):
         pl = rl(five=(10, int(n) + 7200), context_window={"used_percentage": 0, "total_input_tokens": 0}, session_id=T4_SID,
                 prompt_cache={"caching_observed": True, "warm": False})
@@ -2122,7 +2122,7 @@ check("end to end: with prompt_cache (cold and warm) the stripped output equals 
 check("end to end: with prompt_cache and NO_COLOR=1 the output equals 0.2's byte for byte", oks)
 _c, _o = run_script(os.path.join(os.path.dirname(HERE), "truegauge.py"),
                     dict(PAYLOADS3[0], prompt_cache={"caching_observed": True, "warm": False}), {})
-check("end to end: a cold payload really prints an amber context group", (AMB + CTX + RS) in _o.decode("utf-8"), _o)
+check("end to end: a cold payload really prints an blue context group", (AMB + CTX + RS) in _o.decode("utf-8"), _o)
 _c, _o = run_script(os.path.join(os.path.dirname(HERE), "truegauge.py"),
                     dict(PAYLOADS3[0], prompt_cache={"caching_observed": True, "warm": False}), {"TRUEGAUGE_MARK": "all"})
 check("end to end: TRUEGAUGE_MARK=all from the environment marks the red windows and the cold context group",
