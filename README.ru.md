@@ -1,6 +1,7 @@
-# truegauge
-
-Строка состояния для Claude Code, которая не выдаёт старое число за текущее.
+<p align="center"><img src="serpentis-emblem.png" alt="Serpentis AI" width="200"></p>
+<h1 align="center">truegauge</h1>
+<p align="center">Строка состояния для Claude Code, которая не выдаёт старое число за текущее.</p>
+<p align="center"><sub>Serpentis AI &middot; <a href="https://serpentis.ai">serpentis.ai</a> &middot; Apache-2.0</sub></p>
 
 ```
 4h 38% 3d 54% F4% Т548К 55% Σ2.6М

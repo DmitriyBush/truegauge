@@ -1,6 +1,7 @@
-# truegauge
-
-A status line for Claude Code that never shows an old number as a current one.
+<p align="center"><img src="serpentis-emblem.png" alt="Serpentis AI" width="200"></p>
+<h1 align="center">truegauge</h1>
+<p align="center">A status line for Claude Code that never shows an old number as a current one.</p>
+<p align="center"><sub>by Serpentis AI &middot; <a href="https://serpentis.ai">serpentis.ai</a> &middot; Apache-2.0</sub></p>
 
 ```
 4h 38% 3d 54% F4% T548K 55% Σ2.6M
