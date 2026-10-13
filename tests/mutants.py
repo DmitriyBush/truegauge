@@ -195,7 +195,7 @@ MUTANTS = [
     ("mark: Sigma marked", 'parts.append("%s%s%s" % (SIGMA,', 'parts.append("{" + "%s%s%s" % (SIGMA,'),
     ("mark: put on a window group that is not past the threshold", "                if _reached(v, cc[\"th\"][key]):\n                    group = _decorate",
      "                if True:\n                    group = _decorate"),
-    # ---- order 20 (2026-10-10): the lens findings; the number of the finding is in the name
+    # ---- review findings (2026-10-10); the number of the finding is in the name
     ("finding 3: last call refreshed on EVERY call", 'if rec_changed or not run_ok or not 0 <= now - run["at"] < RUN_EVERY_S:', 'if True:'),
     ("finding 3: last call refreshed only with a change of the record", 'if rec_changed or not run_ok or not 0 <= now - run["at"] < RUN_EVERY_S:', 'if rec_changed or not run_ok:'),
     ("finding 3: 60 s boundary off by one", '< RUN_EVERY_S:', '<= RUN_EVERY_S:'),
