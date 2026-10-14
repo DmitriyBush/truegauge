@@ -1954,6 +1954,7 @@ def test_state_survives_compaction_damaged_record():
                       ("session not a text", {"tokens": 548200, "pct": 55, "sid": 5, "at": 5}),
                       ("session empty", {"tokens": 548200, "pct": 55, "sid": "", "at": 5}),
                       ("no time", {"tokens": 548200, "pct": 55, "sid": "abcd1234"}),
+                      ("no percent key", {"tokens": 548200, "sid": "abcd1234", "at": 5}),
                       ("stale_since a text", {"tokens": 548200, "pct": 55, "sid": "abcd1234", "at": 5, "stale_since": "x"})):
         fresh()
         n = time.time()

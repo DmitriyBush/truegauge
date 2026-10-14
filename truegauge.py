@@ -1033,10 +1033,11 @@ def _remember_cache(payload, now):
 
 
 def _context_valid(rec):
-    """The saved context reading has the expected shape: tokens a number > 0, pct a number or None, sid a text, at a
-    number, stale_since absent / None / a number. Anything else is "no reading"."""
+    """The saved context reading has the expected shape: tokens a number > 0, pct present and a number or None, sid a
+    text, at a number, stale_since absent / None / a number. Anything else is "no reading". pct must be PRESENT: render,
+    _context_apply and --show read rec["pct"] directly (the line itself always writes the key)."""
     return (isinstance(rec, dict) and _num(rec.get("tokens")) is not None and rec["tokens"] > 0
-            and (rec.get("pct") is None or _num(rec.get("pct")) is not None)
+            and "pct" in rec and (rec["pct"] is None or _num(rec["pct"]) is not None)
             and isinstance(rec.get("sid"), str) and bool(rec["sid"]) and _num(rec.get("at")) is not None
             and (rec.get("stale_since") is None or _num(rec.get("stale_since")) is not None))
 

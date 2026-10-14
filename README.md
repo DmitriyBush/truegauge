@@ -173,9 +173,10 @@ What the line does **not** tell you:
 
 ## Cold cache (blue context group)
 
-**Not measured: do I get the data at all?** Claude Code 2.1.293: whether the `prompt_cache` fields arrive in the status
-line is not measured. No blue does NOT mean a warm cache: until `python truegauge.py --show` has shown
-`present=True`, the blue colour may never light up at all (the `cache:` line then says `cold now: unknown`).
+**Measured on one install** (Claude Code 2.1.293, the author's machine, 2026-10-12, two sessions): `prompt_cache`
+does arrive in the status line; `expires_at` came as epoch seconds about one hour ahead, and `ttl` as the string `"1h"`
+(truegauge does not read `ttl`). On another version or install this is not known: no blue does NOT mean a warm cache
+until `python truegauge.py --show` has shown `present=True` (otherwise the `cache:` line says `cold now: unknown`).
 
 The context group (`T548K 55%`, both parts together) turns **blue** when the prompt cache of your main session has
 gone cold. A cold cache means the next message re-sends the whole context at full price instead of the cheap cached
@@ -185,7 +186,7 @@ price, so this is the moment to think before sending a long-context message.
   main session only, from v2.1.251; subagents are not counted). truegauge reads `caching_observed`, `warm` and
   `expires_at` from it.
 - **Cold** means: `caching_observed` is `true` AND (`warm` is `false` OR `expires_at` is a time in epoch SECONDS that has passed; a value outside 2017-07-14 .. 2100-01-01 (for example
-  milliseconds) is not judged: the unit is an assumption from the documentation, no live input has been seen).
+  milliseconds) is not judged; the unit, taken from the documentation, matched the live input measured above).
   No `prompt_cache`, one of another type, caching not observed, or a field of the wrong type means **not cold**: no
   data is never shown as cold. Claude Code's status line documentation (section "When the status line updates") says when the line is
   re-run; truegauge relies on that for the blue to appear without a new message when a warm cache reaches
@@ -195,8 +196,8 @@ price, so this is the moment to think before sending a long-context message.
   goes over the plan it is 5 minutes, so blue appears more often then.
 - **What is not coloured.** `Σ` (tokens spent in the session, subagents included) is never coloured: the cache state
   is known for the main session only, so it cannot say anything about the subagents' part. Fable and the window groups
-  keep their own rules. If there is no context reading (0 tokens: before the first reply, after `/compact`) there is
-  nothing to colour.
+  keep their own rules. Before the first reply of a session there is no context reading and nothing to colour; after
+  `/compact` the group shows the saved reading as an upper bound (see the next section) and is coloured like a live one.
 - **Colour.** `TRUEGAUGE_COLD_COLOR`: `#rrggbb` (default `#b1b9f9`, bold; the blue Claude Code itself uses for `/clear` in its idle hint «new task? /clear to save N tokens», dark theme), `ansi` (the bold bright blue of your
   terminal theme) or `off` / `0` (no colour). Empty or unset = default; anything else is refused, the default is used
   and `--show` names the refusal. `NO_COLOR` removes this colour too. The group is closed with `ESC[22;39m`, like the
@@ -209,6 +210,26 @@ price, so this is the moment to think before sending a long-context message.
   and which made the change). `cache: no record yet` means the line has
   not run since this version was installed; `present=False` means Claude Code did not send the object (then blue
   never appears, by the rule above). The arrival of `prompt_cache` on a given install is not asserted by the tests.
+
+## Context after `/compact` (`≤`)
+
+Claude Code sends 0 context tokens before the first reply and after `/compact`. Instead of dropping the context group,
+truegauge keeps the last real reading of the SAME session and draws it with `≤`: `≤T549K ≤55%`. Tokens and percent
+are rounded up, so the number stays an upper bound (548 200 tokens -> `≤T549K`). `python truegauge.py --show` prints
+`context: live`, or `context: last reading ... (session ...) at ...; stale since ...`. Another session's reading, no
+saved reading, or a damaged record -> no group: nothing is guessed.
+
+Limits of this:
+
+- `≤` rests on an assumption written in the code: after `/compact` the context only gets smaller. It held on a large
+  context (where it was used); on a small context, or if the model's context window changes between the reading and
+  `/compact`, it is not measured, and the real value could be higher than the bound.
+- There is one saved reading for all sessions. If another session writes its reading in between, this session's group
+  is not shown after `/compact` (the number of the other session is never shown instead; without a saved reading the
+  line behaves as 0.2 did).
+- The saved reading has no expiry: a session resumed days later still shows its old `≤` reading. The bound stays true,
+  but it can be far from the real value.
+- `--show` prints `context: live` without the age or the session of that reading.
 
 ## Mark for colour-blind users (underline, braces, bold)
 
@@ -236,7 +257,7 @@ harmless. **One unknown element refuses the whole setting**: no mark at all (not
 `--show` names the element. **If the mark is not visible,** run `python truegauge.py --show`: the line
 `status line cold colour: ...; mark: ...` is what the running line really used, and a
 `REFUSED (default used): TRUEGAUGE_MARK=...` part names a value that was rejected (nothing is added to the status line itself, and the
-refusal is also written to the error record). The words of the first 0.3 draft, `brackets` and `both`, are not valid any more.
+refusal is also written to the error record).
 
 Example, a line with the 5-hour window past its threshold and a cold cache (`ESC` sequences are invisible; this is
 the text you see):
@@ -375,6 +396,8 @@ python tests/mutants.py          # breaks the code on purpose; every break must 
   according to Claude Code's documentation) and the line cannot see it; `Σ` is not coloured for that reason.
 - Whether `prompt_cache` reaches your status line is a property of your Claude Code version; `--show` tells you
   (`cache:` line). Without it there is no blue, and nothing is guessed.
+- After `/compact` the context group is an upper bound from a saved reading; its own limits are listed under
+  "Context after `/compact`".
 
 ## License
 
