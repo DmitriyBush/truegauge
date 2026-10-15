@@ -37,8 +37,13 @@ os.environ["PATH"] = os.pathsep.join(x for x in os.environ.get("PATH", "").split
                                      if "claude-code" not in x.lower() and not x.lower().rstrip("\\/").endswith("npm"))
 # Colour settings of the person running the tests must not reach the checks (a TRUEGAUGE_RED_5H=50 in their shell
 # would turn every 0.1 check at >= 50% into a false FAIL); the colour checks set what they need themselves.
-for _k in ("TRUEGAUGE_RED_5H", "TRUEGAUGE_RED_7D", "TRUEGAUGE_RED_COLOR", "TRUEGAUGE_COLD_COLOR", "TRUEGAUGE_MARK", "NO_COLOR"):
+for _k in ("TRUEGAUGE_RED_5H", "TRUEGAUGE_RED_7D", "TRUEGAUGE_RED_COLOR", "TRUEGAUGE_COLD_COLOR", "TRUEGAUGE_MARK", "NO_COLOR",
+           "TRUEGAUGE_FRESH_COLOR", "TRUEGAUGE_TIME", "TRUEGAUGE_DIM_COLOR"):
     os.environ.pop(_k, None)
+# 0.4: the checks written before the dim colour run with it OFF -- the line then keeps the pre-0.4 signs (`>=`, `<=`,
+# `Σ>=`), so every one of them still pins the rounding, the bounds and the red invariant. The dim block (search
+# "0.4 dim") switches it on itself.
+os.environ["TRUEGAUGE_DIM_COLOR"] = "off"
 import truegauge as tg  # noqa: E402
 
 
@@ -62,6 +67,7 @@ def guard_path(p):
 
 fails = []
 NOW = 1_800_000_000
+FRESH_G = "\033[1;38;2;78;186;101m5h\033[22;39m"  # 0.4: the 5-hour group right after a reset (default green, no percent)
 
 
 def check(name, cond, got=None):
@@ -125,8 +131,8 @@ tg.update(rl(five=(70, NOW + 100)), NOW)
 check("one second before reset -> open", tg.read_state(NOW + 99)["five_hour"]["status"] == "fresh")
 s = tg.read_state(NOW + 100)["five_hour"]
 check("at reset -> expired, no remainder", s["status"] == "expired" and s["remaining_percentage"] is None, s)
-check("expired window is left out, not the old number and not a guessed 0%", tg.render({"five_hour": s}, None, None) == "",
-      tg.render({"five_hour": s}, None, None))
+check("expired 5h -> green `5h` with NO percent: not the old number, not a guessed 0%",
+      tg.render({"five_hour": s}, None, None) == FRESH_G, tg.render({"five_hour": s}, None, None))
 
 # ---- bad input never stored
 fresh()
@@ -440,9 +446,9 @@ check("stale 5h: floor with >=, never above the reading", got == "4h ≥38%", go
 got = R({"five_hour": win("fresh", 38.5, 14400)})
 check("fresh rounds half up", got == "4h 39%", got)
 got = R({"five_hour": win("expired", 90, -5), "seven_day": win("expired", 80, -5)})
-check("expired windows are left out", got == "", got)
+check("expired 5h -> green `5h`, expired week left out", got == FRESH_G, got)
 got = R({"five_hour": win("expired", 90, -5), "seven_day": win("fresh", 54, 3600)})
-check("week in its last day with the 5h window absent cannot pass for the 5h group", got == "0d 54%", got)
+check("week in its last day next to the fresh `5h`: `5h` and `0d 54%` stay apart", got == FRESH_G + " 0d 54%", got)
 got = R({"seven_day": win("stale_reading", 54.7, 3 * 86400)})
 check("stale week", got == "3d ≥54%", got)
 got = R({"fable": win("fresh", 4)})
@@ -591,7 +597,7 @@ before = get(sp)
 code, out, err = cli("--install", "--settings", sp)
 s = json.loads(get(sp))
 check("install with another line: exit 0", code == 0, (code, err))
-check("install: key order kept (statusLine stays in place)", list(s) == ["model", "statusLine", "env", "permissions"], list(s))
+check("install: key order kept (statusLine stays in place; 0.4 appends `hooks` last)", list(s) == ["model", "statusLine", "env", "permissions", "hooks"], list(s))
 check("install: other keys kept byte-for-value", all(s[k] == orig[k] for k in ("model", "env", "permissions")), s)
 check("install: backup holds the exact previous bytes", len(backups(sp)) == 1 and get(backups(sp)[0]) == before)
 check("install: the other line is saved",
@@ -852,7 +858,8 @@ import importlib.util  # noqa: E402
 import re  # noqa: E402
 import time  # noqa: E402
 
-COLOR_VARS = ("NO_COLOR", "TRUEGAUGE_RED_5H", "TRUEGAUGE_RED_7D", "TRUEGAUGE_RED_COLOR", "TRUEGAUGE_COLD_COLOR", "TRUEGAUGE_MARK")
+COLOR_VARS = ("NO_COLOR", "TRUEGAUGE_RED_5H", "TRUEGAUGE_RED_7D", "TRUEGAUGE_RED_COLOR", "TRUEGAUGE_COLD_COLOR", "TRUEGAUGE_MARK",
+              "TRUEGAUGE_FRESH_COLOR", "TRUEGAUGE_TIME")
 RED = "\033[1;38;2;255;0;0m"
 RS = "\033[22;39m"
 SGR_RX = re.compile(r"\x1b\[[0-9;]*m")
@@ -908,7 +915,8 @@ with envset():
     check("red week fresh 98.49 -> 98%, not red", g7(98.49) == "3d 98%", g7(98.49))
     check("red week fresh 98.5 -> 99%, red", g7(98.5) == red_of("3d 99%"), g7(98.5))
     check("red week old 98.5 -> >=98%, red", g7(98.5, "stale_reading") == red_of("3d ≥98%"), g7(98.5, "stale_reading"))
-    check("red: expired window -> no group at all", g5(99.9, "expired", -5) == "" and g7(99.9, "expired", -5) == "")
+    check("red: expired 5h -> green `5h`, never red; expired week -> no group",
+          g5(99.9, "expired", -5) == FRESH_G and g7(99.9, "expired", -5) == "", (g5(99.9, "expired", -5), g7(99.9, "expired", -5)))
     check("red: a reading far below the threshold is not red", g5(10) == "2h 10%" and g7(10) == "3d 10%")
 
     # the invariant: the SAME reading, fresh then 901 s later old -- the colour does not change
@@ -1020,7 +1028,7 @@ check("--show: says the values are those of this shell, settings.json env seen o
 check("--show: per-window verdict (5h past, week not)", "five_hour: past the red threshold: yes" in out
       and "seven_day: past the red threshold: no" in out, out)
 check("--show: with refusals the line lists them", "REFUSED (default used): TRUEGAUGE_RED_5H='abc'" in shown({"TRUEGAUGE_RED_5H": "abc"}))
-check("version is 0.2.0 or later (0.3.0 is pinned in the 0.3 block)", tg.__version__ in ("0.2.0", "0.3.0"))
+check("version is 0.2.0 or later (0.3.0 is pinned in the 0.3 block)", tg.__version__ in ("0.2.0", "0.3.0", "0.4.0"))
 
 # ---- equivalence with v0.1.0 (kept byte for byte as tests/ref_v0_1_0.py)
 _spec = importlib.util.spec_from_file_location("ref_v0_1_0", os.path.join(HERE, "ref_v0_1_0.py"))
@@ -1047,8 +1055,24 @@ for i5, f5 in enumerate(FIVES):
 states.append(({}, None, (None, None), "en"))  # empty input
 
 
+FRESH_RX = re.compile(r"^(\x1b\[[0-9;]*m)?5h(\x1b\[22;39m)?(?! ≥?\d+%)( |$)")  # `5h` NOT followed by a percent: a live 5:00:00 is `5h 0%`
+
+
+def _expired5(s):
+    return (s[0].get("five_hour") or {}).get("status") == "expired"
+
+
+def unfresh(s, out):
+    """0.4's one intended difference from earlier versions: an expired 5-hour window is a leading `5h` group. Cut it
+    (only where the state has an expired 5h, and only if it is there) so the rest is compared byte for byte."""
+    if not _expired5(s):
+        return out
+    m = FRESH_RX.match(out)
+    return out[m.end():] if m else "<NO FRESH GROUP>" + out
+
+
 def both(s):
-    return (tg.render(s[0], s[1], s[2][0], s[3], s[2][1]), ref.render(s[0], s[1], s[2][0], s[3], s[2][1]))
+    return (unfresh(s, tg.render(s[0], s[1], s[2][0], s[3], s[2][1])), ref.render(s[0], s[1], s[2][0], s[3], s[2][1]))
 
 
 check("equivalence set has at least 30 states and includes the empty one", len(states) >= 30 and states[-1][0] == {}, len(states))
@@ -1112,9 +1136,9 @@ def count_errors(fn):
     """Run fn() with _record_error counted (the original still runs)."""
     orig, calls = tg._record_error, []
 
-    def spy(msg):
+    def spy(msg, **kw):
         calls.append(msg)
-        return orig(msg)
+        return orig(msg, **kw)
     tg._record_error = spy
     try:
         fn()
@@ -1132,7 +1156,8 @@ check("SF1: refused value -> default used and the refusal is saved in render_cfg
       isinstance(rc, dict) and "TRUEGAUGE_RED_5H" in rc["refused"] and rc["th"]["five_hour"] == 98, rc)
 check("SF1: new refusal -> exactly one error, naming the variable",
       len(errs) == 1 and "colour setting refused" in errs[0] and "TRUEGAUGE_RED_5H" in errs[0], errs)
-check("SF1: the error reaches last_error in the state", "colour setting refused" in state_now().get("last_error", {}).get("msg", ""))
+check("SF1: the error reaches the state as a fault of an extra (last_extra_error)", "colour setting refused" in state_now().get("last_extra_error", {}).get("msg", ""))
+check("SF1: ... and NOT as last_error (a refused setting says nothing about the readings)", "last_error" not in state_now(), state_now().get("last_error"))
 at1 = state_now().get("render_cfg_at")
 errs = count_errors(lambda: sl(60, {"TRUEGAUGE_RED_5H": "95%"}, _n + 100))
 check("SF1: same setting again -> no second error", errs == [], errs)
@@ -1471,7 +1496,9 @@ with envset(TRUEGAUGE_MARK="braces", TRUEGAUGE_RED_5H="off"):
     got = tg.render({"five_hour": win("fresh", 100, 7200)}, None, None, "en", None)
     check("mark=braces, 5h threshold off, 5h at 100% -> no mark (no condition, no mark)", got == "2h 100%", got)
 with envset(TRUEGAUGE_MARK="underline"):
-    check("mark=underline: an expired window has no group, so no mark", tg.render({"five_hour": win("expired", 99.9, -5)}, None, None, "en", None) == "")
+    check("mark=underline: the fresh `5h` after a reset is not marked (it has no percent to mark)",
+          tg.render({"five_hour": win("expired", 99.9, -5)}, None, None, "en", None) == FRESH_G,
+          tg.render({"five_hour": win("expired", 99.9, -5)}, None, None, "en", None))
     check("mark=underline, cold but no reading: nothing to mark", tg.render({}, None, None, "en", 0, cold=True) == "")
     check("mark=underline, old (>=) reading past the threshold: marked like a fresh one",
           tg.render({"five_hour": win("stale_reading", 97.6, 7200)}, None, None, "en", None) == RED + UL + "2h ≥97%" + ULX + RS)
@@ -1855,7 +1882,7 @@ _n = time.time()
 errs = count_errors(lambda: sl(10, {"TRUEGAUGE_MARK": "brackets"}, _n))
 check("finding 2: a refused TRUEGAUGE_MARK goes into the error record naming the variable and the value",
       any("TRUEGAUGE_MARK" in e and "brackets" in e for e in errs), errs)
-check("finding 2: ... and it is in the state file (last_error)", "TRUEGAUGE_MARK" in str((state_now().get("last_error") or {}).get("msg")), state_now().get("last_error"))
+check("finding 2: ... and it is in the state file (last_extra_error)", "TRUEGAUGE_MARK" in str((state_now().get("last_extra_error") or {}).get("msg")), state_now().get("last_extra_error"))
 errs = count_errors(lambda: sl(10, {"TRUEGAUGE_MARK": "brackets"}, _n + 1))
 check("finding 2: the same refusal again -> not recorded again", not any("TRUEGAUGE_MARK" in e for e in errs), errs)
 check("finding 2: --show names the refusal in the status line's settings", "REFUSED (default used): TRUEGAUGE_MARK=" in cli("--show")[1])
@@ -2071,7 +2098,12 @@ check("equivalence set (0.3 against 0.2) has at least 30 states", len(states) >=
 
 
 def both2(s, cold):
-    return (tg.render(s[0], s[1], s[2][0], s[3], s[2][1], cold=cold), ref2.render(s[0], s[1], s[2][0], s[3], s[2][1]))
+    return (unfresh(s, tg.render(s[0], s[1], s[2][0], s[3], s[2][1], cold=cold)), ref2.render(s[0], s[1], s[2][0], s[3], s[2][1]))
+
+
+check("equivalence (0.4): the fresh `5h` is really there on every state with an expired 5h, and nowhere else",
+      all((FRESH_RX.match(tg.render(s[0], s[1], s[2][0], s[3], s[2][1])) is not None) == _expired5(s) for s in states)
+      and sum(_expired5(s) for s in states) >= 20, sum(_expired5(s) for s in states))
 
 
 for label, cold in (("a warm cache / no prompt_cache", False),):
@@ -2128,7 +2160,1080 @@ _c, _o = run_script(os.path.join(os.path.dirname(HERE), "truegauge.py"),
                     dict(PAYLOADS3[0], prompt_cache={"caching_observed": True, "warm": False}), {"TRUEGAUGE_MARK": "all"})
 check("end to end: TRUEGAUGE_MARK=all from the environment marks the red windows and the cold context group",
       _o.decode("utf-8").count(UL) == 3 and _o.decode("utf-8").count("{") == 3 and _o.decode("utf-8").count("}") == 3, _o)
-check("version is 0.3.0", tg.__version__ == "0.3.0")
+
+# ---- 0.4: the agent warning (--hook) -------------------------------------------------------------------------
+import subprocess  # noqa: E402
+
+R5, R7 = NOW + 4800 + 30, NOW + 3 * 86400 + 100  # 5h window: 1h 20m left -> "1h"; week: 3d 0h -> "3d"
+
+
+def win(pct, rst, status="fresh", age=10):
+    """A window as read_state() returns it (the only fields the warning reads)."""
+    v = {"status": status, "used_percentage": pct, "resets_at": rst, "resets_in_s": rst - NOW, "reading_age_s": age}
+    if status == "expired":
+        v = {"status": "expired", "resets_at": rst, "resets_in_s": rst - NOW, "last_seen_used_percentage": pct,
+             "remaining_percentage": None, "reading_age_s": age}
+    return v
+
+
+TH = (80, 90, 95)
+for pct, lvl in ((0, 0), (79.99, 0), (80.0, 80), (80.01, 80), (89.99, 80), (90.0, 90), (94.99, 90), (95.0, 95), (100.0, 95)):
+    check("agent level of %s%% is %d (boundary included)" % (pct, lvl), tg.agent_level(pct, TH) == lvl, tg.agent_level(pct, TH))
+for pct, lvl in ((79.99, 0), (80.0, 80), (80.01, 80), (89.99, 80), (90.0, 90), (95.0, 95), (100.0, 95)):
+    t, new = tg.agent_decide({"five_hour": win(pct, R5)}, TH, {})
+    check("decide: %s%% from nothing -> %s" % (pct, "silence" if lvl == 0 else "one message, level %d recorded" % lvl),
+          (t is None and new == {}) if lvl == 0 else (t is not None and new == {"five_hour": {"resets_at": R5, "level": lvl}}), (t, new))
+
+t, new = tg.agent_decide({"five_hour": win(91, R5), "seven_day": win(64, R7)}, TH, {})
+check("decide: text for both windows is a statement with the number and the time left",
+      t == "Claude plan usage (truegauge): 5-hour window 91% used, resets in 1h; weekly window 64% used, resets in 3d.", t)
+check("decide: both windows recorded when it speaks (the weekly one at level 0)",
+      new == {"five_hour": {"resets_at": R5, "level": 90}, "seven_day": {"resets_at": R7, "level": 0}}, new)
+t, new2 = tg.agent_decide({"five_hour": win(91, R5), "seven_day": win(64, R7)}, TH, new)
+check("decide: the same level again -> silence, record unchanged", t is None and new2 == new, (t, new2))
+t, new3 = tg.agent_decide({"five_hour": win(93, R5), "seven_day": win(64, R7)}, TH, new)
+check("decide: growth inside the same level (91 -> 93) -> silence", t is None, t)
+t, new4 = tg.agent_decide({"five_hour": win(95, R5), "seven_day": win(64, R7)}, TH, new)
+check("decide: next level (90 -> 95) -> a message", t is not None and new4["five_hour"]["level"] == 95, (t, new4))
+t, a = tg.agent_decide({"five_hour": win(80, R5)}, TH, {})
+t2, b = tg.agent_decide({"five_hour": win(91, R5)}, TH, a)
+check("decide: 80 then 91 in one window: second message is level 90", t is not None and t2 is not None and b["five_hour"]["level"] == 90, (t, t2))
+t, c = tg.agent_decide({"five_hour": win(91, R5)}, TH, {})
+t2, _ = tg.agent_decide({"five_hour": win(91, R5)}, TH, c)
+check("decide: a jump 0 -> 91 is ONE message of level 90 (not 80 and 90)", t is not None and c["five_hour"]["level"] == 90 and t2 is None, (t, c, t2))
+t, _ = tg.agent_decide({"five_hour": win(81, R5 + 5 * 3600)}, TH, c)
+check("decide: a new window (other resets_at) starts again from 0 -> level 80 speaks", t is not None, t)
+t, _ = tg.agent_decide({"five_hour": win(60, R5 + 5 * 3600)}, TH, c)
+check("decide: a new window below the first threshold -> silence", t is None, t)
+t, _ = tg.agent_decide({"five_hour": win(97, R5, status="expired")}, TH, {})
+check("decide: an expired window is silent", t is None, t)
+t, _ = tg.agent_decide({"five_hour": win(97, R5, status="expired"), "seven_day": win(82, R7)}, TH, {})
+check("decide: expired 5h + live week -> a message about the week only",
+      t == "Claude plan usage (truegauge): weekly window 82% used, resets in 3d.", t)
+t, _ = tg.agent_decide({"five_hour": win(91.7, R5, status="stale_reading", age=14 * 60), "seven_day": win(64, R7)}, TH, {})
+check("decide: a stale reading is `at least` (rounded DOWN) with its age",
+      t == "Claude plan usage (truegauge): 5-hour window at least 91% used (reading 14 min old), resets in 1h; weekly window 64% used, resets in 3d.", t)
+t, _ = tg.agent_decide({"five_hour": win(91, R5, status="stale_reading", age=None)}, TH, {})
+check("decide: a stale reading with an unknown age says so", t is not None and "reading age unknown" in t, t)
+t, _ = tg.agent_decide({"five_hour": win(91, R5)}, None, {})
+check("decide: off (thresholds None) -> silence", t is None, t)
+t, _ = tg.agent_decide({}, TH, {})
+check("decide: no windows -> silence", t is None, t)
+t, _ = tg.agent_decide({"five_hour": win(91, R5), "seven_day": win(85, NOW + 5 * 3600)}, TH, {})
+check("decide: the week in its last day is still written in days (0d), never in hours", t is not None and "weekly window 85% used, resets in 0d" in t, t)
+t, _ = tg.agent_decide({"five_hour": win(91.0, R5, age=5), "seven_day": win(64, R7)}, TH, {}, "ru")
+check("decide: Russian text", t == "Лимит плана Claude (truegauge): 5-часовое окно 91 % использовано, сброс через 1ч; недельное окно 64 % использовано, сброс через 3д.", t)
+t, _ = tg.agent_decide({"five_hour": win(91.7, R5, status="stale_reading", age=14 * 60)}, TH, {}, "ru")
+check("decide: Russian stale text", t is not None and "не менее 91 % использовано (показанию 14 мин)" in t, t)
+for bad in (None, [], "x", {"five_hour": "x"}, {"five_hour": {"resets_at": R5}}, {"five_hour": {"resets_at": R5, "level": True}},
+            {"five_hour": {"resets_at": "x", "level": 90}}, {"five_hour": {"resets_at": R5, "level": "90"}}):
+    try:
+        t, _ = tg.agent_decide({"five_hour": win(91, R5)}, TH, bad)
+        ok = t is not None
+    except Exception as e:
+        ok = False
+        t = repr(e)
+    check("decide: a damaged record %r is treated as nothing announced" % (bad,), ok, t)
+check("the text has no imperative (statement only)", not any(w in t.lower() for w in ("please", "should", "stop", "must")), t)
+
+# thresholds
+for raw, want, bad in ((None, (80, 90, 95), False), ("", (80, 90, 95), False), ("  ", (80, 90, 95), False), ("off", None, False),
+                       ("OFF", None, False), ("0", None, False), ("70", (70,), False), ("95, 80,90", (80, 90, 95), False),
+                       ("80,80", (80,), False), ("100", (100,), False), ("101", (80, 90, 95), True), ("-5", (80, 90, 95), True),
+                       ("80,abc", (80, 90, 95), True), ("80,,90", (80, 90, 95), True), ("80.5", (80, 90, 95), True),
+                       ("off,80", (80, 90, 95), True), ("1e2", (80, 90, 95), True)):
+    got, why = tg.agent_thresholds(raw)
+    check("TRUEGAUGE_AGENT_AT=%r -> %r%s" % (raw, want, ", refusal named" if bad else ""), got == want and bool(why) == bad, (got, why))
+
+# the hook function: state -> JSON / silence
+AGENT_ENV = ("TRUEGAUGE_AGENT_AT", "TRUEGAUGE_LANG")
+
+
+@contextlib.contextmanager
+def agent_env(**kw):
+    old = {k: os.environ.get(k) for k in AGENT_ENV}
+    for k in AGENT_ENV:
+        os.environ.pop(k, None)
+    os.environ.update(kw)
+    try:
+        yield
+    finally:
+        for k in AGENT_ENV:
+            os.environ.pop(k, None)
+        os.environ.update({k: v for k, v in old.items() if v is not None})
+
+
+def hook_in(event="PostToolUse", now=NOW + 5, raw=None):
+    return tg.hook_output(json.dumps({"hook_event_name": event}) if raw is None else raw, now=now)
+
+
+def seed(five=None, seven=None):
+    d = fresh()
+    tg.update(rl(five=five, seven=seven), NOW)
+    return d
+
+
+with agent_env():
+    seed(five=(91.0, R5), seven=(64.0, R7))
+    o = hook_in()
+    j = json.loads(o)
+    check("hook: output is exactly {hookSpecificOutput: {hookEventName, additionalContext}}",
+          list(j) == ["hookSpecificOutput"] and sorted(j["hookSpecificOutput"]) == ["additionalContext", "hookEventName"], j)
+    check("hook: hookEventName is the incoming one (PostToolUse)", j["hookSpecificOutput"]["hookEventName"] == "PostToolUse", j)
+    check("hook: the text carries both windows",
+          j["hookSpecificOutput"]["additionalContext"].startswith("Claude plan usage (truegauge): 5-hour window 91% used")
+          and "weekly window 64% used" in j["hookSpecificOutput"]["additionalContext"], j)
+    rec = json.loads(get(os.path.join(tg.HOME, "agent_warned.json")))
+    check("hook: agent_warned.json = {sessions: {session_id: {window: {resets_at, level}, seen}}}",
+          sorted(rec) == ["hook", "sessions"] and rec["sessions"][""]["five_hour"] == {"resets_at": R5, "level": 90}
+          and rec["hook"] == {"outcome": "spoke", "since": NOW + 5}
+          and rec["sessions"][""]["seen"] == NOW + 5, rec)
+    check("hook: second call, same state -> silence", hook_in() is None)
+    check("hook: other event of the pair, same state -> silence (one announcement for all events)", hook_in("UserPromptSubmit") is None)
+    tg.update(rl(five=(96.0, R5), seven=(64.0, R7)), NOW + 10)
+    j = json.loads(hook_in("UserPromptSubmit", now=NOW + 15))
+    check("hook: next level -> a message with the UserPromptSubmit name", j["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+          and "96% used" in j["hookSpecificOutput"]["additionalContext"], j)
+    check("hook: Stop and other events are silent even above the threshold", hook_in("Stop") is None and hook_in("SessionStart") is None)
+    check("hook: no hook_event_name -> silence", hook_in(raw="{}") is None)
+    check("hook: JSON that is not an object -> silence", hook_in(raw="[1]") is None and hook_in(raw="null") is None)
+
+    seed(five=(79.99, R5), seven=(10.0, R7))
+    check("hook: 79.99 -> silence; the record names why and holds no session",
+          hook_in() is None and json.loads(get(os.path.join(tg.HOME, "agent_warned.json")))
+          == {"sessions": {}, "hook": {"outcome": "silent: below the thresholds, or already told", "since": NOW + 5}})
+    seed(five=(80.0, R5), seven=(10.0, R7))
+    check("hook: 80.0 -> a message", hook_in() is not None)
+    seed()
+    check("hook: no state file at all -> silence", hook_in() is None)
+    seed(five=(97.0, NOW - 100), seven=(10.0, R7))
+    check("hook: an expired window -> silence", hook_in() is None)
+
+    d = seed(five=(91.0, R5))
+    put(os.path.join(d, "agent_warned.json"), "{ not json")
+    check("hook: a damaged agent_warned.json does not crash; speaks and rewrites it",
+          hook_in() is not None and json.loads(get(os.path.join(d, "agent_warned.json")))["sessions"][""]["five_hour"]["level"] == 90)
+    put(os.path.join(d, "agent_warned.json"), "[1,2]")
+    check("hook: agent_warned.json that is not an object = nothing announced", hook_in() is not None)
+
+    # once per threshold PER SESSION: a background `claude -p` cannot use up the main session's warning
+    def hook_sid(sid, event="PostToolUse", now=NOW + 5):
+        return hook_in(raw=json.dumps({"hook_event_name": event, "session_id": sid}), now=now)
+
+    def book(d):
+        return json.loads(get(os.path.join(d, "agent_warned.json")))
+
+    d = seed(five=(91.0, R5), seven=(64.0, R7))
+    check("hook/session: session A is told", hook_sid("aaaa-1") is not None)
+    check("hook/session: session A again -> silence", hook_sid("aaaa-1") is None)
+    check("hook/session: session A, the other event -> silence", hook_sid("aaaa-1", "UserPromptSubmit") is None)
+    check("hook/session: session B is told too (A's warning is not B's)", hook_sid("bbbb-2") is not None)
+    check("hook/session: no session_id -> told once (shared record)", hook_in() is not None and hook_in() is None)
+    check("hook/session: a non-string session_id is the shared record", hook_sid(123) is None and hook_sid("") is None)
+    check("hook/session: the book holds A, B and the shared record", sorted(book(d)["sessions"]) == ["", "aaaa-1", "bbbb-2"], book(d))
+    tg.update(rl(five=(96.0, R5), seven=(64.0, R7)), NOW + 10)
+    check("hook/session: the next level reaches A and B, each once",
+          hook_sid("aaaa-1", now=NOW + 15) is not None and hook_sid("bbbb-2", now=NOW + 15) is not None
+          and hook_sid("aaaa-1", now=NOW + 16) is None and hook_sid("bbbb-2", now=NOW + 16) is None)
+
+    d = seed(five=(91.0, R5))
+    put(os.path.join(d, "agent_warned.json"), json.dumps({"five_hour": {"resets_at": R5, "level": 90}}))
+    check("hook/session: a record in the unsessioned form = nothing announced (speaks)", hook_in() is not None)
+
+    d = seed(five=(91.0, R5))
+    keep = tg.AGENT_KEEP_S
+    put(os.path.join(d, "agent_warned.json"), json.dumps({"sessions": {
+        "old": {"five_hour": {"resets_at": R5, "level": 90}, "seen": NOW + 5 - keep},
+        "edge": {"five_hour": {"resets_at": R5, "level": 90}, "seen": NOW + 5 - keep + 1},
+        "noseen": {"five_hour": {"resets_at": R5, "level": 90}},
+        "boolseen": {"seen": True},
+        "notadict": 7}}))
+    hook_sid("new")
+    check("hook/session: records older than AGENT_KEEP_S, without `seen` or damaged are dropped; one second younger is kept",
+          sorted(book(d)["sessions"]) == ["edge", "new"], book(d))
+    check("hook/session: a kept session stays silent at its level", hook_sid("edge") is None)
+
+    d = seed(five=(91.0, R5))
+    n = tg.AGENT_KEEP_N
+    put(os.path.join(d, "agent_warned.json"), json.dumps({"sessions": {
+        "s%03d" % i: {"five_hour": {"resets_at": R5, "level": 90}, "seen": NOW - 1000 + i} for i in range(n)}}))
+    hook_sid("newest")
+    s_ = book(d)["sessions"]
+    check("hook/session: at most AGENT_KEEP_N sessions; the oldest goes, the newest is written",
+          len(s_) == n and "s000" not in s_ and "s001" in s_ and "s%03d" % (n - 1) in s_ and "newest" in s_, len(s_))
+    check("hook/session: AGENT_KEEP_S covers the 7-day window, AGENT_KEEP_N is 200",
+          tg.AGENT_KEEP_S == 8 * 86400 and tg.AGENT_KEEP_N == 200)
+
+    # subagents: Claude Code gives their tool calls the parent's session_id and their own agent_id (measured live 15.10)
+    d = seed(five=(91.0, R5), seven=(64.0, R7))
+    sub = lambda aid, now=NOW + 5: hook_in(raw=json.dumps({"hook_event_name": "PostToolUse", "session_id": "S", "agent_id": aid}), now=now)
+    check("hook/subagent: a subagent is told on its own record", sub("ag1") is not None and sub("ag1") is None)
+    check("hook/subagent: the main conversation of the same session is still told", hook_sid("S") is not None and hook_sid("S") is None)
+    check("hook/subagent: another subagent is told too", sub("ag2") is not None)
+    check("hook/subagent: records are `S`, `S#ag1`, `S#ag2`", sorted(book(d)["sessions"]) == ["S", "S#ag1", "S#ag2"], book(d))
+    check("hook/subagent: an empty or non-string agent_id is the main record",
+          tg._session_key({"session_id": "S", "agent_id": ""}) == "S" and tg._session_key({"session_id": "S", "agent_id": 5}) == "S")
+
+    # one window = resets_at within AGENT_SAME_WINDOW_S (a jitter of the reset time does not re-announce)
+    for shift, again in ((tg.AGENT_SAME_WINDOW_S - 1, False), (tg.AGENT_SAME_WINDOW_S, True), (-(tg.AGENT_SAME_WINDOW_S - 1), False)):
+        t, w0 = tg.agent_decide({"five_hour": win(91, R5)}, TH, {})
+        t2, _ = tg.agent_decide({"five_hour": win(91, R5 + shift)}, TH, w0)
+        check("decide: resets_at moved by %+d s -> %s" % (shift, "new window, told again" if again else "same window, silent"),
+              (t2 is not None) == again, t2)
+    check("decide: AGENT_SAME_WINDOW_S is 600", tg.AGENT_SAME_WINDOW_S == 600)
+
+    # every silence is named, and recorded only on change
+    d = fresh()
+    hook_in()
+    check("hook/outcome: no state at all -> `no usable plan window` (file: missing)",
+          book(d)["hook"]["outcome"] == "silent: no usable plan window in state.json (file: missing)", book(d))
+    d = seed()
+    hook_in()
+    check("hook/outcome: a state without windows -> `no usable plan window` (file: ok)",
+          book(d)["hook"]["outcome"] == "silent: no usable plan window in state.json (file: ok)", book(d))
+    d = seed(five=(97.0, NOW - 100), seven=(10.0, NOW - 50))
+    hook_in()
+    check("hook/outcome: only ended windows -> `no usable plan window`", book(d)["hook"]["outcome"].startswith("silent: no usable plan window"), book(d))
+    d = seed(five=(50.0, R5))
+    hook_in(event="Stop", now=NOW + 5)
+    check("hook/outcome: an event not ours is named", book(d)["hook"]["outcome"] == 'silent: event not ours ("Stop")', book(d))
+    hook_in(event="Stop", now=NOW + 99)
+    check("hook/outcome: the same outcome again is NOT rewritten (since stays)", book(d)["hook"]["since"] == NOW + 5, book(d))
+    hook_in(raw="[1]", now=NOW + 100)
+    check("hook/outcome: input that is not an object is named", book(d)["hook"] == {"outcome": "silent: hook input is not a JSON object", "since": NOW + 100}, book(d))
+    d = seed(five=(91.0, R5))
+    put(os.path.join(d, "agent_warned.json"), "{ not json")
+    hook_in()
+    check("hook/outcome: a damaged record is named in the outcome", book(d)["hook"]["outcome"] == "spoke; agent_warned.json was damaged (corrupt): treated as empty", book(d))
+    d = seed(five=(91.0, R5))
+    put(os.path.join(d, "agent_warned.json"), json.dumps({"sessions": [1]}))
+    hook_in()
+    check("hook/outcome: `sessions` not an object is named", book(d)["hook"]["outcome"].endswith("damaged (sessions not an object): treated as empty"), book(d))
+
+    # the age in the text is the OLDER of: numbers last confirmed, this window last sent
+    d = seed(five=(91.0, R5), seven=(64.0, R7))
+    tg.update(rl(five=(92.0, R5)), NOW + 1200)  # only the 5-hour window comes again, CHANGED; the week was last sent at NOW
+    st = tg.read_state(NOW + 1205)
+    check("read_state: sent_age_s per window", st["five_hour"]["sent_age_s"] == 5 and st["seven_day"]["sent_age_s"] == 1205, st)
+    check("read_state: the numbers were confirmed 5 s ago (the two ages really differ here)", st["seven_day"]["reading_age_s"] == 5, st)
+    t, _ = tg.agent_decide({"seven_day": dict(st["seven_day"], used_percentage=91.0)}, TH, {})
+    check("agent text: a window not sent for 20 min says its own age, not the fresh one of the other window",
+          "reading 20 min old" in (t or ""), t)
+
+    d = seed(five=(91.0, R5))
+    check("hook: stale reading says `at least` and the real age (60 min)", "at least 91% used (reading 60 min old)" in json.loads(hook_in(now=NOW + 3600))["hookSpecificOutput"]["additionalContext"])
+
+with agent_env(TRUEGAUGE_AGENT_AT="off"):
+    seed(five=(99.0, R5), seven=(99.0, R7))
+    check("hook: TRUEGAUGE_AGENT_AT=off -> silence; the record says off and holds no session",
+          hook_in() is None and json.loads(get(os.path.join(tg.HOME, "agent_warned.json")))
+          == {"sessions": {}, "hook": {"outcome": "silent: off (TRUEGAUGE_AGENT_AT)", "since": NOW + 5}})
+with agent_env(TRUEGAUGE_AGENT_AT="garbage"):
+    d = seed(five=(91.0, R5))
+    check("hook: a garbage TRUEGAUGE_AGENT_AT -> the default thresholds", hook_in() is not None)
+    check("hook: ... and the refusal is in the hook's own record (a settings `env` value is not visible to a shell)",
+          json.loads(get(os.path.join(d, "agent_warned.json")))["hook"]["outcome"]
+          == "spoke; REFUSED (default used): TRUEGAUGE_AGENT_AT='garbage' (integers 1..100 separated by commas, or off)")
+with agent_env(TRUEGAUGE_AGENT_AT="50"):
+    seed(five=(55.0, R5))
+    check("hook: TRUEGAUGE_AGENT_AT=50 -> speaks at 55%", hook_in() is not None)
+with agent_env(TRUEGAUGE_LANG="ru"):
+    seed(five=(91.0, R5))
+    check("hook: TRUEGAUGE_LANG=ru -> Russian text", "Лимит плана Claude (truegauge)" in json.loads(hook_in())["hookSpecificOutput"]["additionalContext"])
+
+# the real script: stdout / exit code in every case
+def run_hook(stdin, home, extra=None):
+    guard_path(home)
+    env = {k: v for k, v in os.environ.items() if k not in COLOR_VARS and k not in AGENT_ENV}
+    env.update(TRUEGAUGE_HOME=home, TRUEGAUGE_FABLE="0", **(extra or {}))
+    r = subprocess.run([sys.executable, os.path.join(os.path.dirname(HERE), "truegauge.py"), "--hook"],
+                       input=stdin, capture_output=True, env=env)
+    return r.returncode, r.stdout, r.stderr
+
+
+import time as _time  # noqa: E402
+_n = int(_time.time())
+d = fresh()
+tg.update(rl(five=(91.0, _n + 4800), seven=(64.0, _n + 3 * 86400 + 100)), _n)
+c1, o1, e1 = run_hook(b'{"hook_event_name":"PostToolUse"}', d)
+c2, o2, e2 = run_hook(b'{"hook_event_name":"PostToolUse"}', d)
+check("script --hook: first call prints the JSON, exit 0, nothing on stderr", c1 == 0 and e1 == b"" and json.loads(o1)["hookSpecificOutput"]["hookEventName"] == "PostToolUse", (c1, o1, e1))
+check("script --hook: second call prints NOTHING, exit 0", c2 == 0 and o2 == b"" and e2 == b"", (c2, o2, e2))
+for label, raw in (("unreadable stdin (not JSON)", b"\xff\xfe nonsense"), ("empty stdin", b""), ("unknown event", b'{"hook_event_name":"Stop"}')):
+    d = fresh()
+    tg.update(rl(five=(91.0, _n + 4800)), _n)
+    c, o, e = run_hook(raw, d)
+    check("script --hook: %s -> empty stdout, exit 0" % label, c == 0 and o == b"", (c, o, e))
+d = fresh()
+c, o, e = run_hook(b'{"hook_event_name":"PostToolUse"}', d)
+check("script --hook: no state at all -> empty stdout, exit 0", c == 0 and o == b"", (c, o, e))
+c, o, e = run_hook(b"not json", d)
+check("script --hook: unreadable stdin leaves the reason in the hook's own record",
+      json.loads(get(os.path.join(d, "agent_warned.json")))["hook"]["outcome"].startswith("fault: hook: JSONDecodeError"),
+      get(os.path.join(d, "agent_warned.json")))
+check("script --hook: ... and NOT in the state file (no state file is created for it)", not os.path.exists(os.path.join(d, "state.json")))
+
+# a fault INSIDE the decision: still silent, exit 0, recorded
+import io as _io  # noqa: E402
+d = fresh()
+tg.update(rl(five=(91.0, R5)), NOW)
+_real_rs = tg.read_state
+_real_in = sys.stdin
+_real_out = sys.stdout
+
+
+class _Std(object):
+    def __init__(self, data=b""):
+        self.buffer = _io.BytesIO(data)
+
+
+tg.read_state = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+sys.stdin, sys.stdout = _Std(b'{"hook_event_name":"PostToolUse"}'), _Std()
+try:
+    rc = tg.hook_mode()
+    printed = sys.stdout.buffer.getvalue()
+finally:
+    tg.read_state, sys.stdin, sys.stdout = _real_rs, _real_in, _real_out
+check("hook: an exception inside -> exit 0, empty stdout", rc == 0 and printed == b"", (rc, printed))
+check("hook: the exception is recorded in the hook's own record", "boom" in json.loads(get(tg._warned_path()))["hook"]["outcome"], get(tg._warned_path()))
+check("hook: ... and NOT in the state file's last_error", "last_error" not in json.loads(get(tg.STATE)), get(tg.STATE))
+_st = tg.read_state(NOW + 5)
+check("hook: a hook fault leaves the human's status line fresh (no `unresolved error` on the windows)",
+      _st["five_hour"]["status"] == "fresh" and _st["_tap"]["unresolved_error"] is None, _st)
+
+# a failed write of the record: nothing is said (a message that cannot be recorded would repeat on every call)
+d = fresh()
+tg.update(rl(five=(91.0, R5)), NOW)
+_real_save = tg._save
+tg._save = lambda *a, **k: (_ for _ in ()).throw(OSError("disk"))
+try:
+    with agent_env():
+        try:
+            out_failed = hook_in()
+        except OSError:
+            out_failed = "raised"
+finally:
+    tg._save = _real_save
+check("hook: if the record cannot be saved nothing is said (the fault is raised to hook_mode, which stays silent)", out_failed == "raised", out_failed)
+
+# --show line
+d = fresh()
+tg.update(rl(five=(91.0, R5)), NOW)
+with agent_env():
+    hook_in()
+    code, out, _ = cli("--show")
+check("--show: agent warning line with thresholds and what is announced",
+      "agent warning: thresholds (this shell) 80,90,95; announced: 1 session(s); last told " in out
+      and "(session without id): five_hour level 90" in out, out)
+check("--show: the hook's own last outcome", "agent hook, as the hook saw it (its environment is Claude Code's, not this shell's): spoke (since " in out, out)
+d = fresh()
+code, out, _ = cli("--show")
+check("--show: no hook run yet is said", "agent hook: no run recorded yet" in out, out)
+put(os.path.join(d, "agent_warned.json.tmp999"), "{}")
+os.utime(os.path.join(d, "agent_warned.json.tmp999"), (NOW - 600, NOW - 600))
+check("orphans: a left-behind agent_warned.json.tmp is counted", tg._orphans(NOW) == 1, tg._orphans(NOW))
+with agent_env(TRUEGAUGE_AGENT_AT="zzz"):
+    code, out, _ = cli("--show")
+check("--show: a refused TRUEGAUGE_AGENT_AT is named", "REFUSED (default used): TRUEGAUGE_AGENT_AT='zzz'" in out, out)
+with agent_env(TRUEGAUGE_AGENT_AT="off"):
+    code, out, _ = cli("--show")
+check("--show: off", "agent warning: thresholds (this shell) off" in out, out)
+
+# ---- install / uninstall of the hooks in a TEMP settings.json with FOREIGN hooks
+FOREIGN_POST = {"matcher": "Bash", "hooks": [{"type": "command", "command": "python ~/mine/post.py", "timeout": 5}]}
+FOREIGN_PROMPT = {"hooks": [{"type": "command", "command": "python ~/mine/prompt.py"}]}
+d = fresh()
+sp = os.path.join(d, "settings.json")
+orig = {"model": "opus", "hooks": {"PostToolUse": [FOREIGN_POST], "UserPromptSubmit": [FOREIGN_PROMPT], "Stop": [{"hooks": [{"type": "command", "command": "x"}]}]}}
+put(sp, json.dumps(orig, indent=2))
+code, out, err = cli("--install", "--settings", sp)
+s = json.loads(get(sp))
+ours = [(ev, h) for ev in ("PostToolUse", "UserPromptSubmit") for e in s["hooks"][ev] for h in e["hooks"] if "truegauge.py" in h.get("command", "")]
+check("hooks install: exit 0", code == 0, (code, err))
+check("hooks install: our entry is added to PostToolUse and to UserPromptSubmit", sorted(ev for ev, _ in ours) == ["PostToolUse", "UserPromptSubmit"], ours)
+check("hooks install: the command is `<our command> --hook`, timeout 10, type command",
+      all(h["command"] == tg._our_command() + " --hook" and h["timeout"] == 10 and h["type"] == "command" for _, h in ours), ours)
+check("hooks install: foreign entries are intact and first",
+      s["hooks"]["PostToolUse"][0] == FOREIGN_POST and s["hooks"]["UserPromptSubmit"][0] == FOREIGN_PROMPT and s["hooks"]["Stop"] == orig["hooks"]["Stop"], s["hooks"])
+check("hooks install: the status line is set too", "truegauge.py" in s["statusLine"]["command"] and "--hook" not in s["statusLine"]["command"], s["statusLine"])
+check("hooks install: ONE write, ONE backup", len(backups(sp)) == 1, backups(sp))
+code, outs, _ = cli("--status", "--settings", sp)
+check("hooks status: both hooks yes", "PostToolUse yes, UserPromptSubmit yes" in outs, outs)
+written = get(sp)
+code, out2, _ = cli("--install", "--settings", sp)
+check("hooks install twice: no duplicates, file untouched, says already", code == 0 and get(sp) == written and "already" in out2, out2)
+code, out3, _ = cli("--uninstall", "--settings", sp)
+s = json.loads(get(sp))
+check("hooks uninstall: our entries gone, foreign ones intact",
+      s["hooks"] == orig["hooks"] and "statusLine" not in s and s["model"] == "opus", s)
+code, outs, _ = cli("--status", "--settings", sp)
+check("hooks status after uninstall: both no", "PostToolUse no, UserPromptSubmit no" in outs, outs)
+check("hooks status: no NOTE when nothing is off", "NOTE:" not in outs, outs)
+put(sp, json.dumps({"disableAllHooks": True, "hooks": {"PostToolUse": [{"hooks": [{"type": "command", "command": "python /old/place/truegauge.py --hook"}]}]}}))
+code, outs, _ = cli("--status", "--settings", sp)
+check("hooks status: disableAllHooks is named", "NOTE: disableAllHooks is true in this file" in outs, outs)
+check("hooks status: a hook of ours from another copy is named", "NOTE: a hook of ours runs another copy or interpreter (moved?): python /old/place/truegauge.py --hook" in outs, outs)
+
+# our hook next to a foreign one INSIDE one entry; empties are removed, the foreign stays
+d = fresh()
+sp = os.path.join(d, "settings.json")
+put(sp, json.dumps({"hooks": {"PostToolUse": [{"matcher": "x", "hooks": [{"type": "command", "command": "a.py"},
+                    {"type": "command", "command": "python /x/truegauge.py --hook"}]}]}}))
+code, out, _ = cli("--uninstall", "--settings", sp)
+s = json.loads(get(sp))
+check("hooks uninstall (statusLine not ours): only our command leaves a shared entry",
+      code == 0 and s == {"hooks": {"PostToolUse": [{"matcher": "x", "hooks": [{"type": "command", "command": "a.py"}]}]}}, s)
+check("hooks uninstall: a backup was made first", len(backups(sp)) == 1)
+d = fresh()
+sp = os.path.join(d, "settings.json")
+put(sp, json.dumps({"model": "m", "hooks": {"PostToolUse": [{"hooks": [{"type": "command", "command": "python /x/truegauge.py --hook"}]}]}}))
+code, out, _ = cli("--uninstall", "--settings", sp)
+check("hooks uninstall: empty list and empty `hooks` key are removed", json.loads(get(sp)) == {"model": "m"}, get(sp))
+d = fresh()
+sp = os.path.join(d, "settings.json")
+put(sp, json.dumps({"hooks": {"PostToolUse": [], "Foo": []}}))
+before = get(sp)
+code, out, _ = cli("--uninstall", "--settings", sp)
+check("uninstall with no hooks of ours: file untouched even if `hooks` has empty lists", get(sp) == before and backups(sp) == [], out)
+d = fresh()
+sp = os.path.join(d, "settings.json")
+put(sp, json.dumps({"hooks": {"PostToolUse": [{"hooks": [{"type": "command", "command": "python /x/truegauge.py"}]}]}}))
+before = get(sp)
+code, out, _ = cli("--uninstall", "--settings", sp)
+check("uninstall: a command naming truegauge.py WITHOUT --hook is not ours", get(sp) == before, get(sp))
+
+# --no-agent-hook
+d = fresh()
+sp = os.path.join(d, "settings.json")
+put(sp, json.dumps(orig, indent=2))
+code, out, _ = cli("--install", "--no-agent-hook", "--settings", sp)
+s = json.loads(get(sp))
+check("--no-agent-hook: status line set, hooks exactly as before", code == 0 and s["hooks"] == orig["hooks"] and "truegauge.py" in s["statusLine"]["command"], s)
+code, out, _ = cli("--install", "--settings", sp)
+s = json.loads(get(sp))
+check("install after `--no-agent-hook` adds the hooks (status line already ours)",
+      code == 0 and "hooks added" in out and len(s["hooks"]["PostToolUse"]) == 2 and len(s["hooks"]["UserPromptSubmit"]) == 2, (out, s["hooks"]))
+code, out, _ = cli("--uninstall", "--settings", sp)
+s = json.loads(get(sp))
+check("uninstall after a two-step install: the line that was there BEFORE truegauge comes back (here: none), hooks gone, foreign hooks intact",
+      code == 0 and "statusLine" not in s and s["hooks"] == orig["hooks"], s)
+d = fresh()
+sp = os.path.join(d, "settings.json")
+code, out, _ = cli("--install", "--no-agent-hook", "--settings", sp)
+check("--no-agent-hook on a missing file: no `hooks` key at all", "hooks" not in json.loads(get(sp)), get(sp))
+
+# a shape we do not understand is refused, nothing written
+for label, content in (("`hooks` is a list", {"hooks": []}), ("`hooks.PostToolUse` is an object", {"hooks": {"PostToolUse": {}}})):
+    d = fresh()
+    sp = os.path.join(d, "settings.json")
+    put(sp, json.dumps(content))
+    before = get(sp)
+    code, out, err = cli("--install", "--settings", sp)
+    check("install refuses when %s: exit 2, file untouched, no saved previous" % label,
+          code == 2 and get(sp) == before and backups(sp) == [] and not os.path.exists(prev_file()), (code, err))
+
+check("version is 0.4.0", tg.__version__ == "0.4.0")
+
+
+# ---- 0.4: the fresh 5-hour group, TRUEGAUGE_TIME, the idle probe
+def w1(status, used=None, rin=None):
+    """The window shape read_state returns (the first `win` of this file; a later `win` takes other arguments)."""
+    v = {"status": status, "resets_in_s": rin, "used_percentage": used, "remaining_percentage": None}
+    if status == "fresh":
+        v["remaining_percentage"] = 100 - used
+    return v
+
+
+EXP5 = {"five_hour": w1("expired", 99, -5)}
+with envset():
+    check("fresh 5h: default green #4eba65, no percent", R(EXP5) == FRESH_G, R(EXP5))
+    check("live 5:00:00 left -> `5h 0%`: it keeps its percent, so it is not the fresh group",
+          R({"five_hour": w1("fresh", 0, 18000)}) == "5h 0%", R({"five_hour": w1("fresh", 0, 18000)}))
+    check("live 4:59:59 left -> `4h 0%`", R({"five_hour": w1("fresh", 0, 17999)}) == "4h 0%", R({"five_hour": w1("fresh", 0, 17999)}))
+    check("fresh 5h with Fable and tokens: the rest of the line is unchanged",
+          R(dict(EXP5, fable=w1("fresh", 4, None)), {"new": 2600000, "complete": True}) == FRESH_G + " F4% Σ2.6M",
+          R(dict(EXP5, fable=w1("fresh", 4, None)), {"new": 2600000, "complete": True}))
+    check("fresh 5h is never red, whatever the old reading was", RED not in R(EXP5), R(EXP5))
+    check("expired week alone -> nothing (the week is not replaced)", R({"seven_day": w1("expired", 80, -5)}) == "",
+          R({"seven_day": w1("expired", 80, -5)}))
+    check("no 5h data at all (first install) -> no `5h` group: only a known reset shows it", R({}) == "", R({}))
+with envset(NO_COLOR="1"):
+    check("NO_COLOR -> plain `5h`", R(EXP5) == "5h", R(EXP5))
+for off in ("off", "0", "OFF"):
+    with envset(TRUEGAUGE_FRESH_COLOR=off):
+        check("TRUEGAUGE_FRESH_COLOR=%r -> plain `5h`, not a refusal" % off,
+              R(EXP5) == "5h" and "TRUEGAUGE_FRESH_COLOR" not in tg.color_config()["refused"], R(EXP5))
+with envset(TRUEGAUGE_FRESH_COLOR="ansi"):
+    check("TRUEGAUGE_FRESH_COLOR=ansi -> bold bright green", R(EXP5) == "\033[1;92m5h" + RS, R(EXP5))
+with envset(TRUEGAUGE_FRESH_COLOR="#00ff00"):
+    check("TRUEGAUGE_FRESH_COLOR=#00ff00 -> that colour", R(EXP5) == "\033[1;38;2;0;255;0m5h" + RS, R(EXP5))
+with envset(TRUEGAUGE_FRESH_COLOR="green"):
+    cc = tg.color_config()
+    check("TRUEGAUGE_FRESH_COLOR=green -> default colour + refusal named",
+          R(EXP5) == FRESH_G and "TRUEGAUGE_FRESH_COLOR" in cc["refused"], (R(EXP5), cc["refused"]))
+with envset(TRUEGAUGE_MARK="all"):
+    check("mark=all does not touch the fresh `5h`", R(EXP5) == FRESH_G, R(EXP5))
+with envset(TRUEGAUGE_RED_COLOR="#123456", TRUEGAUGE_COLD_COLOR="#654321"):
+    check("other colours do not change the fresh `5h`", R(EXP5) == FRESH_G, R(EXP5))
+
+# TRUEGAUGE_TIME: parsing
+for raw, want, refused in (("", "short", False), ("short", "short", False), ("full", "full", False), ("FULL", "full", False),
+                           (" full ", "full", False), ("long", "short", True), ("2", "short", True)):
+    with envset(TRUEGAUGE_TIME=raw):
+        cc = tg.color_config()
+        check("TRUEGAUGE_TIME=%r -> %s%s" % (raw, want, ", refused" if refused else ""),
+              cc["time"] == want and ("TRUEGAUGE_TIME" in cc["refused"]) == refused, (cc["time"], cc["refused"]))
+
+# fmt_left full: boundaries on both sides of each unit change, all rounded down
+for sec, days_only, want in ((0, False, "0m"), (59, False, "0m"), (60, False, "1m"), (3599, False, "59m"),
+                             (3600, False, "1h0m"), (3660, False, "1h1m"), (15900, False, "4h25m"), (17999, False, "4h59m"),
+                             (18000, False, "5h0m"), (86399, False, "23h59m"), (86400, False, "1d0h"),
+                             (568800, False, "6d14h"), (0, True, "0d0h"), (3599, True, "0d0h"), (50400, True, "0d14h"),
+                             (86399, True, "0d23h"), (86400, True, "1d0h"), (604799, True, "6d23h")):
+    check("fmt_left full %d%s -> %s" % (sec, " (week)" if days_only else "", want),
+          tg.fmt_left(sec, W, days_only=days_only, full=True) == want, tg.fmt_left(sec, W, days_only=days_only, full=True))
+# short stays as it was at the same boundaries
+for sec, days_only, want in ((3599, False, "59m"), (3600, False, "1h"), (17999, False, "4h"), (18000, False, "5h"),
+                             (86399, True, "0d"), (86400, True, "1d")):
+    check("fmt_left short %d%s -> %s (unchanged)" % (sec, " (week)" if days_only else "", want),
+          tg.fmt_left(sec, W, days_only=days_only) == want, tg.fmt_left(sec, W, days_only=days_only))
+with envset(TRUEGAUGE_TIME="full"):
+    got = R({"five_hour": w1("fresh", 38.4, 15900), "seven_day": w1("fresh", 54, 568800)})
+    check("full: `4h25m 38% 6d14h 54%`", got == "4h25m 38% 6d14h 54%", got)
+    check("full: the fresh group is `5h0m`", R(EXP5) == "\033[1;38;2;78;186;101m5h0m" + RS, R(EXP5))
+    got = R({"five_hour": w1("fresh", 97.6, 2220)})
+    check("full: last hour is minutes only, red still works", got == RED + "37m 98%" + RS, got)
+with envset():
+    got = R({"five_hour": w1("fresh", 38.4, 15900), "seven_day": w1("fresh", 54, 568800)})
+    check("short (default): `4h 38% 6d 54%`", got == "4h 38% 6d 54%", got)
+
+# --show names the new settings, for this shell and as the status line saw them
+out = shown({"TRUEGAUGE_FRESH_COLOR": "off", "TRUEGAUGE_TIME": "full"})
+check("--show: fresh colour off and time full for this shell", "fresh 5h colour: off; time: full" in out, out)
+out = shown({"TRUEGAUGE_TIME": "long"})
+check("--show: a refused TRUEGAUGE_TIME is named", "TRUEGAUGE_TIME=" in out and "REFUSED" in out, out)
+
+# the saved render settings: 0.3 records stay readable, a wrong shape of a 0.4 key is damage
+fresh()
+base = {"th": {"five_hour": 98, "seven_day": 99}, "sgr": "x", "no_color": False, "refused": {}, "cold_sgr": None, "mark": "off"}
+check("saved settings of 0.3 (no 0.4 keys) are still read", tg._saved_render_cfg({"render_cfg": dict(base)})[0] is not None)
+check("saved settings with 0.4 keys are read",
+      tg._saved_render_cfg({"render_cfg": dict(base, fresh_sgr="y", time="full")})[0] is not None)
+check("saved `time` of the wrong value -> damaged, not believed",
+      tg._saved_render_cfg({"render_cfg": dict(base, time="long")})[0] is None)
+check("saved `fresh_sgr` of the wrong type -> damaged", tg._saved_render_cfg({"render_cfg": dict(base, fresh_sgr=5)})[0] is None)
+
+# the Fable probe is skipped while idle: it runs only when a reply has come since the last probe
+os.environ["TRUEGAUGE_FABLE"] = "1"  # on for these checks only; the spawn is injected, nothing real starts
+for label, done, upd, want in (("first probe ever (no probe yet)", None, None, True),
+                               ("no reply since the last probe started -> skipped", NOW, NOW - 55, False),
+                               ("reply time EQUAL to the last probe's start -> skipped", NOW, NOW - 5, False),
+                               ("a reply DURING the last probe (1 s after it started) -> started", NOW, NOW - 4, True),
+                               ("a reply after the last probe ended -> started", NOW, NOW + 1, True),
+                               ("no reply time recorded at all, a probe was done -> skipped", NOW, None, False)):
+    fresh()
+    d0 = {}
+    if done is not None:
+        d0["probe_done_at"] = done
+        d0["probe_started_at"] = done - 5
+    if upd is not None:
+        d0["updated_at"] = upd
+    tg._save(d0)
+    calls = []
+    r = tg.maybe_start_probe(NOW + 700, spawn=lambda: calls.append(1))
+    d1, _ = tg._read()
+    started_written = d1.get("probe_started_at") == NOW + 700
+    check("idle probe: %s" % label, (r is True) == want and (len(calls) == 1) == want and started_written == want,
+          (r, calls, d1.get("probe_started_at")))
+fresh()
+tg._save({"probe_done_at": NOW, "probe_started_at": NOW - 5, "updated_at": NOW + 10})
+calls = []
+check("idle probe: a reply after the probe, but within 600 s -> still waits for the interval",
+      tg.maybe_start_probe(NOW + 599, spawn=lambda: calls.append(1)) is False and calls == [], calls)
+os.environ["TRUEGAUGE_FABLE"] = "0"  # back to the run-wide setting
+
+# the source is silent: a reply came in THIS session, yet no 5-hour reading -> a reset window is left out, not `5h`
+def _silent_case(with_reply, with_rl):
+    d = fresh()
+    tg.update(rl(five=(70, NOW + 100)), NOW)  # the stored 5-hour window resets at NOW + 100
+    tp = os.path.join(d, "s.jsonl")
+    with open(tp, "w") as f:
+        if with_reply:
+            line = json.loads(msg("m1", 10, 100, 5, 1000))
+            line["timestamp"] = "2027-01-15T08:00:00Z"
+            f.write(json.dumps(line) + "\n")
+        else:
+            f.write(json.dumps({"type": "user", "message": {"content": "hi"}}) + "\n")
+    pl = {"transcript_path": tp, "session_id": "sil"}
+    if with_rl:
+        pl["rate_limits"] = {"five_hour": {"used_percentage": 70, "resets_at": NOW + 100}}  # an idle session's replay
+    with envset(NO_COLOR="1"):
+        return tg.statusline(pl, NOW + 200)
+
+
+got = _silent_case(False, False)
+check("no reply yet in this session, no reading -> `5h` (before the first reply)", got.startswith("5h") and "%" not in got.split(" ")[0], got)
+got = _silent_case(True, False)
+check("a reply came and still no 5-hour reading -> silent source: no `5h`", not got.startswith("5h"), got)
+got = _silent_case(True, True)
+check("a reply came and the (replayed) reading is there -> `5h`", got.startswith("5h") and "%" not in got.split(" ")[0], got)
+
+
+# a real line on 2026-10-15 20:24: the window reset in a working session and Claude Code stopped sending it -> the group
+# vanished. A window THIS session received earlier is a reset, not a silent source: `5h` stays.
+def _reset_case(heard_sid, this_sid="sil", damage=None):
+    d = fresh()
+    tg.update(rl(five=(70, NOW + 100), session_id=heard_sid) if heard_sid else rl(five=(70, NOW + 100)), NOW)
+    if damage is not None:
+        s = state_now()
+        s["five_hour_sids"] = damage
+        tg._save(s)
+    tp = os.path.join(d, "s.jsonl")
+    line = json.loads(msg("m1", 10, 100, 5, 1000))
+    line["timestamp"] = "2027-01-15T08:00:00Z"
+    with open(tp, "w") as f:
+        f.write(json.dumps(line) + "\n")
+    with envset(NO_COLOR="1"):
+        return tg.statusline({"transcript_path": tp, "session_id": this_sid}, NOW + 200)
+
+
+got = _reset_case("sil")
+check("reset: this session received the 5-hour window, then none after the reset -> `5h`",
+      got.startswith("5h") and "%" not in got.split(" ")[0], got)
+got = _reset_case("sil-other-session")
+check("reset: ANOTHER session received it (prefix differs at char 4), this one never -> silent, no `5h`",
+      not got.startswith("5h"), got)
+got = _reset_case("sil", this_sid="sim")
+check("reset: a neighbouring session id (sil/sim) does not count -> silent", not got.startswith("5h"), got)
+got = _reset_case("sil", this_sid=None)
+check("reset: no session id in the payload -> silent (nothing to match)", not got.startswith("5h"), got)
+# the reading in THIS payload still counts on its own: no session id (nothing recorded), yet the window is sent
+_d = fresh()
+tg.update(rl(five=(70, NOW + 100)), NOW)
+_tp = os.path.join(_d, "s.jsonl")
+_line = json.loads(msg("m1", 10, 100, 5, 1000))
+_line["timestamp"] = "2027-01-15T08:00:00Z"
+with open(_tp, "w") as f:
+    f.write(json.dumps(_line) + "\n")
+with envset(NO_COLOR="1"):
+    got = tg.statusline({"transcript_path": _tp, "rate_limits": {"five_hour": {"used_percentage": 70, "resets_at": NOW + 100}}},
+                        NOW + 200)
+check("reset: no session id, but the 5-hour reading is in this payload -> `5h`", got.startswith("5h") and "%" not in got.split(" ")[0], got)
+# a fault in the sessions record is an extra: the line stays, the silent-source rule holds, the fault is filed as an extra
+_orig_heard = tg._heard_five
+def _raise(sid):
+    raise RuntimeError("probe")
+
+
+tg._heard_five = _raise
+try:
+    got = _reset_case("sil")
+finally:
+    tg._heard_five = _orig_heard
+check("reset: a sessions-record fault -> the line stays, no `5h`, filed under last_extra_error",
+      got != "" and not got.startswith("5h") and "sessions record: RuntimeError: probe" in str((state_now().get("last_extra_error") or {}).get("msg"))
+      and "last_error" not in state_now(), (got, state_now().get("last_extra_error"), state_now().get("last_error")))
+for _bad in ("x", ["sil"], {"sil": "yesterday"}, {"sil": None}):
+    got = _reset_case("sil", damage=_bad)
+    check("reset: a damaged sessions record %r -> silent, no fault in the line" % (_bad,), not got.startswith("5h"), got)
+fresh()
+tg.update(rl(five=(70, NOW + 100), session_id="sil"), NOW)
+check("reset: a sessions record is written only with the 5-hour window", state_now().get("five_hour_sids") == {"sil": NOW},
+      state_now().get("five_hour_sids"))
+fresh()
+tg.update(rl(seven=(40, NOW + 86400), session_id="wk"), NOW)
+check("reset: the week alone does not mark the session as sending the 5-hour window", "five_hour_sids" not in state_now(),
+      state_now().get("five_hour_sids"))
+fresh()
+tg.update({"rate_limits": {"five_hour": {"used_percentage": "x", "resets_at": NOW + 100}}, "session_id": "bad"}, NOW)
+check("reset: a refused 5-hour reading does not mark the session", "five_hour_sids" not in state_now(), state_now())
+# a damaged record must not stop the state write: the next 5-hour reading rebuilds it from the sound entries
+fresh()
+tg._save({"five_hour_sids": {"old": NOW - 50, "bad": None, "txt": "yesterday"}})
+tg.update(rl(five=(70, NOW + 100), session_id="new"), NOW)
+check("reset: damaged entries are dropped, the write goes through, sound ones stay",
+      state_now().get("five_hour_sids") == {"old": NOW - 50, "new": NOW} and state_now().get("five_hour", {}).get("used_percentage") == 70,
+      state_now())
+# the record is bounded: SIDS_KEEP newest sessions, none older than SIDS_DAYS (neighbours of both edges)
+_rec = {"s%03d" % i: NOW - 1000 + i for i in range(tg.SIDS_KEEP)}
+_out = tg._recent_sids(_rec, "new", NOW)
+check("reset: SIDS_KEEP + 1 sessions -> the oldest goes, the new one stays",
+      len(_out) == tg.SIDS_KEEP and "s000" not in _out and "s001" in _out and _out["new"] == NOW, sorted(_out)[:3])
+_out = tg._recent_sids({"a": NOW - tg.SIDS_DAYS * 86400, "b": NOW - tg.SIDS_DAYS * 86400 + 1}, "c", NOW)
+check("reset: a session exactly SIDS_DAYS old goes, one second younger stays", sorted(_out) == ["b", "c"], _out)
+with envset():
+    check("render(fresh_ok=False): the reset 5-hour window is left out",
+          tg.render({"five_hour": w1("expired", 99, -5)}, None, None, "en", None, fresh_ok=False) == "")
+fresh()
+_n4 = time.time()
+tg.update(rl(five=(50, int(_n4) + 7200)), _n4)
+with envset(TRUEGAUGE_FRESH_COLOR="ansi", TRUEGAUGE_TIME="full"):
+    tg._remember_render_cfg(tg.color_config(), _n4)
+with envset():
+    out = cli("--show")[1]
+check("--show: the status line's own fresh colour and time mode are shown with its settings",
+      "status line fresh 5h colour: ESC[1;92m; time: full" in out, out)
+
+
+# ---- 0.4 dim: no `>=` / `<=` in the line; a number not being spent now, old or incomplete is dim ----------------------
+# The rule these checks hold: README, "Dim numbers".
+DIM = "\033[38;2;98;98;98m"
+
+
+def dimmed(text):
+    return DIM + text + RS
+
+
+@contextlib.contextmanager
+def dimenv(value=None, **colour):
+    """The dim colour for one block (None = unset = default) on top of envset's colour variables."""
+    old = os.environ.get("TRUEGAUGE_DIM_COLOR")
+    if value is None:
+        os.environ.pop("TRUEGAUGE_DIM_COLOR", None)
+    else:
+        os.environ["TRUEGAUGE_DIM_COLOR"] = value
+    try:
+        with envset(**colour):
+            yield
+    finally:
+        if old is None:
+            os.environ.pop("TRUEGAUGE_DIM_COLOR", None)
+        else:
+            os.environ["TRUEGAUGE_DIM_COLOR"] = old
+
+
+def lit(status, used, rin, active):
+    v = w1(status, used, rin)
+    v["active"] = active
+    return v
+
+
+TOK_DONE = {"new": 2600000, "complete": True}
+TOK_PART = {"new": 2650000, "complete": False}
+with dimenv():
+    check("dim: a fresh 5-hour reading being spent -> plain", R({"five_hour": lit("fresh", 38.4, 7200, True)}) == "2h 38%",
+          R({"five_hour": lit("fresh", 38.4, 7200, True)}))
+    check("dim: a fresh 5-hour reading NOT being spent -> dim, same number",
+          R({"five_hour": lit("fresh", 38.4, 7200, False)}) == dimmed("2h 38%"), R({"five_hour": lit("fresh", 38.4, 7200, False)}))
+    check("dim: a window with no activity key (older state) -> dim", R({"five_hour": w1("fresh", 38.4, 7200)}) == dimmed("2h 38%"))
+    check("dim: an OLD reading -> dim, rounded DOWN, no `>=`",
+          R({"five_hour": lit("stale_reading", 38.9, 7200, False)}) == dimmed("2h 38%"), R({"five_hour": lit("stale_reading", 38.9, 7200, False)}))
+    check("dim: the week not being spent -> dim", R({"seven_day": lit("fresh", 54, 3 * 86400, False)}) == dimmed("3d 54%"))
+    check("dim: the week being spent -> plain", R({"seven_day": lit("fresh", 54, 3 * 86400, True)}) == "3d 54%")
+    check("dim: red wins over dim (fresh 98, not spent now)", R({"five_hour": lit("fresh", 98, 7200, False)}) == red_of("2h 98%"),
+          R({"five_hour": lit("fresh", 98, 7200, False)}))
+    check("dim: red wins over dim (OLD 97.6: half up 98 -> red, number rounded down, no sign)",
+          R({"five_hour": lit("stale_reading", 97.6, 7200, False)}) == red_of("2h 97%"), R({"five_hour": lit("stale_reading", 97.6, 7200, False)}))
+    check("dim: old 97.49 -> not red, dim", R({"five_hour": lit("stale_reading", 97.49, 7200, False)}) == dimmed("2h 97%"))
+    check("dim: the fresh green `5h` is never dim", R(EXP5) == FRESH_G, R(EXP5))
+    check("dim: Fable being spent -> plain", R({"fable": lit("fresh", 4, None, True)}) == "F4%")
+    check("dim: Fable not being spent -> dim", R({"fable": lit("fresh", 4, None, False)}) == dimmed("F4%"))
+    check("dim: Fable old -> dim, no sign", R({"fable": lit("stale_reading", 4.7, 86400, False)}) == dimmed("F4%"),
+          R({"fable": lit("stale_reading", 4.7, 86400, False)}))
+    check("dim: a complete session total -> plain", R({}, TOK_DONE) == "Σ2.6M", R({}, TOK_DONE))
+    check("dim: an incomplete session total -> dim, rounded DOWN, no `>=`", R({}, TOK_PART) == dimmed("Σ2.6M"), R({}, TOK_PART))
+    _st = {"five_hour": lit("fresh", 38.4, 7200, True), "seven_day": lit("fresh", 54, 3 * 86400, False),
+           "fable": lit("fresh", 4, None, False)}
+    check("dim: the whole line -- each group on its own, the spaces between groups never coloured",
+          R(_st, TOK_DONE, 55.2, "en", 548200) == "2h 38% " + dimmed("3d 54%") + " " + dimmed("F4%") + " T548K 55% Σ2.6M",
+          R(_st, TOK_DONE, 55.2, "en", 548200))
+    _signs = []
+    for _status in ("fresh", "stale_reading"):
+        for _act in (True, False):
+            for _u in (0, 0.4, 38.5, 97.6, 98, 99.5, 100):
+                _o = R({"five_hour": lit(_status, _u, 7200, _act), "seven_day": lit(_status, _u, 86400 * 2, _act),
+                        "fable": lit(_status, _u, 86400, _act)}, TOK_PART, 55.2, "en", 548200)
+                if tg.GE in _o or tg.LE in _o:
+                    _signs.append(_o)
+    check("dim: with the dim colour on, no `>=` / `<=` anywhere (84 states)", _signs == [], _signs[:2])
+    # the context group drawn from the saved reading (0 tokens now: before the first reply / after /compact)
+    _last = {"tokens": 548200, "pct": 55.2, "sid": "abc", "at": NOW}
+    _o = tg.render({}, None, 0, "en", 0, False, _last)
+    check("dim: the context from the saved reading -> dim, rounded UP, no `<=`", _o == dimmed("T549K 56%"), _o)
+    _o = tg.render({}, None, 0, "en", 0, True, _last)
+    check("dim: the saved context stays dim even with a cold cache (not live: dim wins over blue)", _o == dimmed("T549K 56%"), _o)
+    check("dim: a live context is never dim", tg.render({}, None, 55.2, "en", 548200) == "T548K 55%")
+with dimenv(NO_COLOR="1"):
+    check("NO_COLOR: no dim; an old reading keeps `>=` (meaning not lost)",
+          R({"five_hour": lit("stale_reading", 38.9, 7200, False)}) == "2h ≥38%", R({"five_hour": lit("stale_reading", 38.9, 7200, False)}))
+    check("NO_COLOR: a fresh reading not being spent -> plain, no sign", R({"five_hour": lit("fresh", 38.4, 7200, False)}) == "2h 38%")
+    check("NO_COLOR: incomplete total keeps `Σ>=`", R({}, TOK_PART) == "Σ≥2.6M", R({}, TOK_PART))
+    check("NO_COLOR: the saved context keeps `<=`", tg.render({}, None, 0, "en", 0, False, _last) == "≤T549K ≤56%")
+for _off in ("off", "0", "OFF"):
+    with dimenv(_off):
+        check("TRUEGAUGE_DIM_COLOR=%r -> no dim, the signs are back, not a refusal" % _off,
+              R({"fable": lit("stale_reading", 4.7, 86400, False)}) == "F≥4%" and "TRUEGAUGE_DIM_COLOR" not in tg.color_config()["refused"],
+              R({"fable": lit("stale_reading", 4.7, 86400, False)}))
+with dimenv("ansi"):
+    check("TRUEGAUGE_DIM_COLOR=ansi -> bright black of the theme, no bold", R({"fable": lit("fresh", 4, None, False)}) == "\033[90mF4%" + RS)
+with dimenv("#112233"):
+    check("TRUEGAUGE_DIM_COLOR=#112233 -> that colour, no bold", R({"fable": lit("fresh", 4, None, False)}) == "\033[38;2;17;34;51mF4%" + RS)
+with dimenv("grey"):
+    _cc = tg.color_config()
+    check("TRUEGAUGE_DIM_COLOR=grey -> default + refusal named",
+          R({"fable": lit("fresh", 4, None, False)}) == dimmed("F4%") and "TRUEGAUGE_DIM_COLOR" in _cc["refused"], _cc["refused"])
+with dimenv(" "):
+    check("TRUEGAUGE_DIM_COLOR=' ' -> default, silently", "TRUEGAUGE_DIM_COLOR" not in tg.color_config()["refused"])
+
+# activity: what makes a number bright, from the state file
+fresh()
+T0 = NOW
+tg.update(rl(five=(40, T0 + 7200), seven=(50, T0 + 3 * 86400)), T0)
+st = tg.read_state(T0 + 10)
+check("activity: a first sighting with no reply -> fresh but not spent now", st["five_hour"]["status"] == "fresh"
+      and st["five_hour"]["active"] is False and st["seven_day"]["active"] is False, st["five_hour"])
+tg.update(rl(five=(40, T0 + 7200), seven=(50, T0 + 3 * 86400)), T0 + 20)
+check("activity: the same numbers again (a replay) -> still not spent", tg.read_state(T0 + 30)["five_hour"]["active"] is False)
+tg.update(rl(five=(41, T0 + 7200), seven=(50, T0 + 3 * 86400)), T0 + 40)
+st = tg.read_state(T0 + 50)
+check("activity: the 5-hour number GREW with no reply here (spent elsewhere) -> bright", st["five_hour"]["active"] is True, st["five_hour"])
+check("activity: ... and only that window: the week did not move -> dim", st["seven_day"]["active"] is False, st["seven_day"])
+fresh()
+tg.update(dict(rl(five=(40, T0 + 7200), seven=(50, T0 + 3 * 86400)), model={"id": "claude-opus-5-5"}), T0, response_at=T0 - 5)
+st = tg.read_state(T0)
+check("activity: a reply in this window -> both plan windows bright (the account is being spent)",
+      st["five_hour"]["active"] is True and st["seven_day"]["active"] is True, st)
+d, _ = tg._read()
+check("activity: a reply on Opus does not mark Fable", d["active"].get("fable") is None and d["active"]["any"] == T0 - 5, d.get("active"))
+check("activity: 900 s after the last spend -> still bright", tg.read_state(T0 - 5 + 900)["five_hour"]["active"] is True)
+check("activity: 901 s after the last spend -> dim", tg.read_state(T0 - 5 + 901)["five_hour"]["active"] is False)
+tg.update(dict(rl(five=(40, T0 + 7200)), model={"id": "claude-opus-5-5"}), T0 + 100, response_at=T0 - 300)
+d, _ = tg._read()
+check("activity: an idle window re-sending an OLDER reply never moves the mark back", d["active"]["any"] == T0 - 5, d["active"])
+tg.update(dict(rl(five=(40, T0 + 7200)), model={"id": "claude-opus-5-5"}), T0 + 100, response_at=T0 + 100 + 61)
+d, _ = tg._read()
+check("activity: a reply time more than 60 s in the future is ignored", d["active"]["any"] == T0 - 5, d["active"])
+tg.update(dict(rl(five=(40, T0 + 7200)), model={"id": "claude-opus-5-5"}), T0 + 100, response_at=T0 + 100 + 60)
+d, _ = tg._read()
+check("activity: 60 s ahead (clock skew) is taken, capped at now", d["active"]["any"] == T0 + 100, d["active"])
+fresh()
+tg.update(rl(five=(40, T0 + 7200)), T0, response_at=T0 - 5, fable_at=T0 - 5)
+d, _ = tg._read()
+check("activity: a Fable reply time marks Fable AND the account", d["active"].get("fable") == T0 - 5 and d["active"]["any"] == T0 - 5,
+      d.get("active"))
+fresh()
+tg.update(dict(rl(five=(40, T0 + 7200)), model={"id": "claude-fable-5-1"}), T0, response_at=T0 - 5)
+d, _ = tg._read()
+check("lens 0.4 dim: a model SWITCH (Fable in the payload, last reply on another model) does not mark Fable",
+      d["active"].get("fable") is None and d["active"]["any"] == T0 - 5, d.get("active"))
+fresh()
+tg.update({"model": {"id": "claude-opus-5-5"}}, T0, response_at=T0 - 5, fable_at=T0 - 5)
+d, _ = tg._read()
+check("lens 0.4 dim: a reply in a session with NO plan windows (API key) marks nothing", d.get("active") is None, d.get("active"))
+fresh()
+tg.update(rl(five=(40, T0 + 7200)), T0, response_at=T0 - 5, spent_at=T0 - 2)
+d, _ = tg._read()
+check("activity: spent_at (subagents included) is the mark when given", d["active"]["any"] == T0 - 2, d.get("active"))
+# the model of the reply itself, read from the transcript (main and subagents)
+_td = fresh()
+_mp = os.path.join(_td, "main.jsonl")
+os.makedirs(os.path.join(_td, "main", "subagents"))
+
+
+def _reply(path, mid, ts, model):
+    line = json.loads(msg(mid, 10, 100, 5, 1000))
+    line["timestamp"] = ts
+    line["message"]["model"] = model
+    with open(path, "a") as f:
+        f.write(json.dumps(line) + "\n")
+
+
+_reply(_mp, "a1", "2027-01-15T08:00:00Z", "claude-opus-5-5")
+_tk = tg.session_tokens(_mp, "sx")
+check("transcript: a main reply on Opus -> spend time, no Fable time", _tk["last_spend_at"] == NOW and _tk["last_fable_at"] is None, _tk)
+_reply(os.path.join(_td, "main", "subagents", "agent-1.jsonl"), "s1", "2027-01-15T08:01:00Z", "claude-fable-5-1")
+_tk = tg.session_tokens(_mp, "sx")
+check("transcript: a SUBAGENT reply on Fable -> Fable time and the later spend time",
+      _tk["last_fable_at"] == NOW + 60 and _tk["last_spend_at"] == NOW + 60 and _tk["last_reply_at"] == NOW, _tk)
+_reply(_mp, "a2", "2027-01-15T08:02:00Z", "CLAUDE-FABLE-5-1[1m]")
+_tk = tg.session_tokens(_mp, "sx")
+check("transcript: a main reply on Fable (any letter case) -> Fable time", _tk["last_fable_at"] == NOW + 120, _tk)
+_reply(_mp, "a3", "2027-01-15T08:03:00Z", 5)
+_tk = tg.session_tokens(_mp, "sx")
+check("transcript: a model that is not text -> not Fable, the reply still counts", _tk["last_fable_at"] == NOW + 120
+      and _tk["last_spend_at"] == NOW + 180, _tk)
+# Fable from the state: bright when a Fable reply is recent or its share moved between two reads
+TF = NOW
+fresh()
+tg.update(rl(five=(40, TF + 7200), seven=(50, TF + 3 * 86400)), TF)
+tg.probe_usage(TF, runner=lambda: "Current week (Fable): 4% used · resets Jan 18\nCurrent week (all models): 50% used · resets Jan 18\n")
+st = tg.read_state(TF + 10)
+check("Fable: first read, no Fable reply -> fresh, dim", st["fable"]["status"] == "fresh" and st["fable"]["active"] is False, st["fable"])
+tg.probe_usage(TF + 600, runner=lambda: "Current week (Fable): 4% used · resets Jan 18\nCurrent week (all models): 50% used · resets Jan 18\n")
+check("Fable: the same share on the next read -> still dim", tg.read_state(TF + 610)["fable"]["active"] is False)
+tg.probe_usage(TF + 1200, runner=lambda: "Current week (Fable): 5% used · resets Jan 18\nCurrent week (all models): 51% used · resets Jan 18\n")
+st = tg.read_state(TF + 1210)
+check("Fable: the share moved -> bright (spent somewhere, any window or machine)", st["fable"]["active"] is True, st["fable"])
+tg.probe_usage(TF + 1800, runner=lambda: "Current week (Fable): 5% used · resets Jan 18\nCurrent week (all models): 51% used · resets Jan 18\n")
+d, _ = tg._read()
+check("Fable: an unchanged read keeps the time of the last move", d["fable"].get("changed_at") == TF + 1200, d["fable"])
+check("Fable: 900 s after the move -> bright; 901 -> dim",
+      tg.read_state(TF + 2100)["fable"]["active"] is True and tg.read_state(TF + 2101)["fable"]["active"] is False)
+tg.update(rl(five=(41, TF + 7200)), TF + 3000, response_at=TF + 2990, fable_at=TF + 2990)
+check("Fable: a reply on Fable -> bright at once, without waiting for the next read",
+      tg.read_state(TF + 3000)["fable"]["active"] is True, tg.read_state(TF + 3000)["fable"])
+_U = "Current week (Fable): %d%% used · resets Jan 18\nCurrent week (all models): 50%% used · resets Jan 18\n"
+fresh()
+tg.update(rl(five=(40, TF + 7200), seven=(50, TF + 3 * 86400)), TF)
+tg.probe_usage(TF, runner=lambda: _U % 80)
+tg.probe_usage(TF + 600, runner=lambda: _U % 0)
+check("lens 0.4 dim: Fable share DROPPED (a new week) -> not a spend, dim", tg.read_state(TF + 610)["fable"]["active"] is False)
+fresh()
+tg.update(rl(five=(40, TF + 7200), seven=(50, TF + 3 * 86400)), TF)
+tg.probe_usage(TF, runner=lambda: _U % 4)
+tg.probe_usage(TF + 1201, runner=lambda: _U % 6)
+check("lens 0.4 dim: Fable grew over a gap > 2 x 600 s -> when it was spent is unknown, dim",
+      tg.read_state(TF + 1210)["fable"]["active"] is False)
+fresh()
+tg.update(rl(five=(40, TF + 7200), seven=(50, TF + 3 * 86400)), TF)
+tg.probe_usage(TF, runner=lambda: _U % 4)
+tg.probe_usage(TF + 1200, runner=lambda: _U % 6)
+check("lens 0.4 dim: Fable grew over a gap of exactly 2 x 600 s -> bright", tg.read_state(TF + 1210)["fable"]["active"] is True)
+fresh()
+tg.update(rl(five=(40, TF + 7200)), TF - 100)
+tg.update(rl(five=(41, TF + 7200)), TF - 10)
+d, _ = tg._read()
+d["active"] = {"any": TF + 3600}
+tg._save(d)
+check("lens 0.4 dim: a mark from the future (clock set back) does not mask a real growth 10 s ago",
+      tg.read_state(TF)["five_hour"]["active"] is True, tg.read_state(TF)["five_hour"])
+fresh()
+tg.update(rl(five=(40, TF + 7200)), TF, response_at=TF - 5)
+d, _ = tg._read()
+d["active"] = "damaged"
+d["changed_at"] = ["damaged"]
+tg._save(d)
+st = tg.read_state(TF)
+check("activity: a damaged record -> dim, never an exception", st["five_hour"]["active"] is False, st["five_hour"])
+tg.update(dict(rl(five=(41, TF + 7200))), TF + 10, response_at=TF + 5)
+d, _ = tg._read()
+check("activity: the next reply rewrites a damaged record", d["active"] == {"any": TF + 5} and isinstance(d["changed_at"], dict), d)
+
+# end to end: two windows of one account share the brightness
+fresh()
+_dir = tg.HOME
+
+
+def _tx(name, with_reply):
+    p = os.path.join(_dir, name + ".jsonl")
+    with open(p, "w") as f:
+        if with_reply:
+            line = json.loads(msg("m-" + name, 10, 100, 5, 1000))
+            line["timestamp"] = "2027-01-15T08:00:00Z"  # = NOW
+            f.write(json.dumps(line) + "\n")
+        else:
+            f.write(json.dumps({"type": "user", "message": {"content": "hi"}}) + "\n")
+    return p
+
+
+_rl = {"five_hour": {"used_percentage": 40, "resets_at": NOW + 7200}, "seven_day": {"used_percentage": 50, "resets_at": NOW + 3 * 86400}}
+with dimenv():
+    _quiet = tg.statusline({"transcript_path": _tx("quiet", False), "session_id": "quiet", "rate_limits": _rl,
+                            "model": {"id": "claude-opus-5-5"}}, NOW + 30)
+    check("e2e: before any reply on the account -> plan windows dim", _quiet.startswith(dimmed("1h 40%")), _quiet)
+    _busy = tg.statusline({"transcript_path": _tx("busy", True), "session_id": "busy", "rate_limits": _rl,
+                           "model": {"id": "claude-opus-5-5"}}, NOW + 40)
+    check("e2e: a reply in one window -> that window bright", _busy.startswith("1h 40% 2d 50%"), _busy)
+    _quiet = tg.statusline({"transcript_path": _tx("quiet", False), "session_id": "quiet", "rate_limits": _rl,
+                            "model": {"id": "claude-opus-5-5"}}, NOW + 50)
+    check("e2e: ... and the OTHER window of the same account bright too (one account, one brightness)",
+          _quiet.startswith("1h 40% 2d 50%"), _quiet)
+    _quiet = tg.statusline({"transcript_path": _tx("quiet", False), "session_id": "quiet", "rate_limits": _rl,
+                            "model": {"id": "claude-opus-5-5"}}, NOW + 902)
+    check("e2e: 15 minutes with no reply anywhere -> both groups dim again",
+          _quiet.startswith(dimmed("1h 40%") + " " + dimmed("2d 50%")), _quiet)
+
+# one state folder per account (0.4)
+_u = os.path.expanduser("~")
+_base = os.path.join(_u, ".truegauge")
+check("home: TRUEGAUGE_HOME wins over CLAUDE_CONFIG_DIR",
+      tg._home({"TRUEGAUGE_HOME": "X:/own", "CLAUDE_CONFIG_DIR": "Y:/other"}) == "X:/own")
+check("home: no CLAUDE_CONFIG_DIR -> ~/.truegauge", tg._home({}) == _base, tg._home({}))
+check("home: CLAUDE_CONFIG_DIR empty or spaces -> ~/.truegauge", tg._home({"CLAUDE_CONFIG_DIR": "  "}) == _base)
+check("home: CLAUDE_CONFIG_DIR = the default ~/.claude -> ~/.truegauge (the default login is not split)",
+      tg._home({"CLAUDE_CONFIG_DIR": os.path.join(_u, ".claude")}) == _base
+      and tg._home({"CLAUDE_CONFIG_DIR": os.path.join(_u, ".claude") + os.sep}) == _base)
+_a = tg._home({"CLAUDE_CONFIG_DIR": os.path.join(ROOT, "acct_a")})
+_b = tg._home({"CLAUDE_CONFIG_DIR": os.path.join(ROOT, "acct_b")})
+check("home: another settings folder -> its own state folder under ~/.truegauge/cfg-<8 hex>",
+      os.path.dirname(_a) == _base and os.path.basename(_a).startswith("cfg-") and len(os.path.basename(_a)) == 12, _a)
+check("home: two settings folders -> two state folders", _a != _b, (_a, _b))
+check("home: the same folder written differently -> the same state folder",
+      tg._home({"CLAUDE_CONFIG_DIR": os.path.join(ROOT, "acct_a") + os.sep}) == _a
+      and tg._home({"CLAUDE_CONFIG_DIR": os.path.join(ROOT, ".", "acct_a")}) == _a)
+if os.name == "nt":
+    check("home: on Windows the letter case of the folder does not split one account",
+          tg._home({"CLAUDE_CONFIG_DIR": os.path.join(ROOT, "ACCT_A")}) == _a)
+check("home: the folder name is the same on every run (not random)", _a == tg._home({"CLAUDE_CONFIG_DIR": os.path.join(ROOT, "acct_a")}))
+fresh()
+tg.update(dict(rl(five=(40, int(time.time()) + 7200)), model={"id": "claude-opus-5-5"}), time.time(), response_at=time.time() - 5)
+with dimenv():
+    _out = cli("--show")[1]
+check("--show: the brightness of each window and the time of the last spend",
+      "five_hour: being spent now: yes (last spend seen: " in _out and "bright for 900 s after it" in _out, _out)
+check("--show: the dim colour of this shell", "dim colour: ESC[38;2;98;98;98m" in _out, _out)
+_old_home = os.environ.pop("TRUEGAUGE_HOME")
+try:
+    _out = cli("--show", cfg=os.path.join(ROOT, "acct_a"))[1]
+    check("--show: another settings folder -> says it has its own state folder",
+          "account: CLAUDE_CONFIG_DIR=%s -> its own state folder" % os.path.join(ROOT, "acct_a") in _out, _out)
+    _out = cli("--show", cfg=os.path.join(_u, ".claude"))[1]
+    check("--show: the default settings folder -> says so", "-> the default state folder" in _out, _out)
+    _old_cfg = os.environ.pop("CLAUDE_CONFIG_DIR", None)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()) as _buf:
+            tg.show()
+        check("--show: no CLAUDE_CONFIG_DIR in the shell -> says it reads the default folder and why it may differ",
+              "account: no CLAUDE_CONFIG_DIR in this shell -> the default state folder" in _buf.getvalue(), _buf.getvalue())
+    finally:
+        if _old_cfg is not None:
+            os.environ["CLAUDE_CONFIG_DIR"] = _old_cfg
+finally:
+    os.environ["TRUEGAUGE_HOME"] = _old_home
+
+fresh()
+with dimenv():
+    tg._remember_render_cfg(tg.color_config(), time.time())
+_d, _ = tg._read()
+check("saved settings: the dim colour the status line used is kept", tg._saved_render_cfg(_d)[0]["dim_sgr"] == DIM, _d.get("render_cfg"))
+_d["render_cfg"]["dim_sgr"] = 5
+check("saved settings: a saved dim colour of the wrong type -> the record is not believed", tg._saved_render_cfg(_d) == (None, None))
+_d["render_cfg"]["dim_sgr"] = None
+check("saved settings: dim off (None) is a valid record", tg._saved_render_cfg(_d)[0] is not None)
+
+fresh()
+tg.update(rl(five=(40, NOW + 7200)), NOW, response_at=NOW - 5)
+_d, _ = tg._read()
+_d["last_error"] = {"at": NOW + 1, "msg": "test fault"}  # an unresolved tap error makes the reading stale_reading
+tg._save(_d)
+_st = tg.read_state(NOW + 10)
+check("lens 0.4 dim: an OLD reading stays dim even while the account is being spent (spend 15 s ago, stale)",
+      _st["five_hour"]["status"] == "stale_reading" and _st["five_hour"]["active"] is False, _st["five_hour"])
+
+# stand 2026-10-15: a fault of an EXTRA, recorded in the same redraw, must not mark live numbers old (dim, rounded down);
+# a fault about the readings still does. Neighbours: the same moment, extra vs not.
+for _extra, _want in ((True, "fresh"), (False, "stale_reading")):
+    fresh()
+    _t = time.time()
+    tg.update(rl(five=(96.6, int(_t) + 7200)), _t, response_at=_t - 5)
+    tg._record_error("colour setting refused (default used): TRUEGAUGE_RED_5H=97.5", extra=_extra)
+    _st = tg.read_state(time.time())
+    check("stand 2026-10-15: a recorded fault (extra=%s) -> the fresh reading is %s" % (_extra, _want),
+          _st["five_hour"]["status"] == _want, _st["five_hour"])
+    if _extra:
+        check("stand 2026-10-15: ... it stays bright (being spent) and is not rounded down",
+              _st["five_hour"]["active"] is True and tg._used(_st["five_hour"], False) == "97%", _st["five_hour"])
+
+# the separate settings recorder (_remember_render_cfg) files a refusal as a fault of an extra too (mutant 2026-10-15)
+fresh()
+os.environ["TRUEGAUGE_RED_5H"] = "95%"
+try:
+    tg._remember_render_cfg(tg.color_config(), time.time())
+finally:
+    os.environ.pop("TRUEGAUGE_RED_5H", None)
+check("stand 2026-10-15: _remember_render_cfg files a refusal under last_extra_error, not last_error",
+      "colour setting refused" in str((state_now().get("last_extra_error") or {}).get("msg")) and "last_error" not in state_now(),
+      state_now())
 
 print("\n%d failed" % len(fails) if fails else "\nALL PASS")
 sys.exit(1 if fails else 0)

@@ -7,8 +7,34 @@ Shows one short line, e.g. `4h 38% 3d 54% F4% T548K 55% Σ2.6M` (number and unit
   F4%      the weekly Fable window (separate allowance), share used
   T548K    tokens in the context window now
   55%      how full the context window is
-  Σ2.6M    tokens spent in this session (main conversation + subagents); `Σ≥2.6M` = a lower bound
+  Σ2.6M    tokens spent in this session (main conversation + subagents); drawn dim when the count is incomplete
+           (a lower bound; with no dim colour: `Σ≥2.6M`)
 A group whose data is unknown is left out, never shown as 0. `T K M` are Cyrillic with TRUEGAUGE_LANG=ru.
+Dim (0.4): a number that is not live is drawn in a dim colour (TRUEGAUGE_DIM_COLOR, default #626262, no bold): a plan
+group (5h, week, Fable) that is not being spent now -- no reply in any window of this account on this machine (for Fable:
+a reply made by a Fable model, read from the transcript: the main session and its subagents; a model switch with no
+reply lights nothing) and no growth of the number within TRUEGAUGE_MAX_AGE_S (900 s); an old reading; the context saved
+from before /compact (still rounded UP; dim ALWAYS, even when the cache is cold: the number is not live); an incomplete
+`Σ` (still rounded DOWN). It lights at the next redraw after a reply and goes dim after 900 s without spending. A reply
+in a session with no plan limits (API-key billing) lights nothing. Order: red beats dim, dim beats blue (blue is only
+for a live context reading); the green `5h` is never dim. A red group built from an old reading is red, with no dim and
+no sign: the old reading had already reached the threshold and use only grows, and its number is a lower bound,
+rounded down (`97%` for a raw 97.6). Without colour (NO_COLOR, TRUEGAUGE_DIM_COLOR=off) there is no dim, and the line
+keeps the signs `≥`, `≤`, `Σ≥` so that the meaning is not lost silently.
+Not measured: the dim group is closed with the same `ESC[22;39m` as the red one; if Claude Code, after that reset,
+draws the text that follows in the terminal's own colour instead of its grey, the text after a dim group may look
+lighter than the rest.
+Accounts: with CLAUDE_CONFIG_DIR set (and TRUEGAUGE_HOME not) the state lives in ~/.truegauge/cfg-<8 hex of the real path>/
+(realpath: junctions and short names are one account); a relative CLAUDE_CONFIG_DIR is taken from the process's current
+folder -- give an absolute path.
+Time left is rounded DOWN: one second into a window `5h` is `4h`. After the 5-hour window has reset and no new
+reading has come yet, its group is a green `5h` with NO percent (0.4) -- a live reading always carries a percent
+(`5h 0%` only if exactly 5:00:00 is left, or the reset time came rounded up), so the missing percent is the sign.
+`5h` means "nothing measured here since the reset": if Claude was not used elsewhere (the Claude web app, another
+machine), the whole window is ahead; otherwise both the time and the share are unknown until the first reply here
+brings the real reading back. When a reply has come in this session and Claude Code still sends no 5-hour reading
+(API-key billing, another account), the source is silent and the group is left out instead.
+TRUEGAUGE_TIME=full shows two units everywhere (`4h25m`, `6d14h`); default `short`.
 
 Sources (all documented Claude Code surfaces, nothing scraped, no token of yours leaves Claude Code):
   * status-line stdin JSON: rate_limits.five_hour / seven_day {used_percentage, resets_at},
@@ -21,8 +47,8 @@ Sources (all documented Claude Code surfaces, nothing scraped, no token of yours
 Colors (0.2): a window group (time + percent) turns red when the reading has reached a threshold:
   half_up(used%) >= TRUEGAUGE_RED_5H (default 98) for the 5-hour window, TRUEGAUGE_RED_7D (default 99) for the week.
   The test is on the RAW reading, so it is the same for a fresh `98%` and an old `≥97%` (an old reading only
-  grew): ageing never changes the colour. Fable, tokens and context fill are never coloured; an expired window
-  has no group. Threshold: an integer 1..100, or `off` / `0` = never; empty or unset = default; anything else
+  grew): ageing never changes the colour. Fable, tokens and context fill are never coloured; an expired 5-hour
+  window is a green `5h` (see render), an expired week has no group. Threshold: an integer 1..100, or `off` / `0` = never; empty or unset = default; anything else
   = default, and `--show` names the refusal. TRUEGAUGE_RED_COLOR: `#rrggbb` (default #ff0000) or `ansi`
   (bold red of your terminal theme). The group is wrapped in `ESC[1;..m ... ESC[22;39m`; the space between groups
   is not. NO_COLOR set to anything non-empty: no colour at all (output identical to 0.1, except for a mark set by
@@ -45,8 +71,9 @@ Honesty rules (the reason this tool exists):
   * A session left idle re-sends its LAST reading. Per window the reading with the larger
     (resets_at, used_percentage) wins; an equal reset with a lower percentage is a replay and is ignored.
   * Use inside a window only grows. A reading that did not change for TRUEGAUGE_MAX_AGE_S (900 s) is shown
-    as "≥N%" (used at least N%, rounded down), never as a point value.
-  * A window whose reset time has passed is left out until a new reading -- not the old number, not a guessed 0%.
+    dim, as a number rounded down (used at least N%), never as a point value; with no colour as "≥N%".
+  * A window whose reset time has passed is left out until a new reading -- not the old number, not a guessed 0%
+    (the 5-hour window shows `5h` without a percent instead, see above; the week is left out).
   * Any failure leaves the status line empty or partial, never wrong; it is recorded in errors.log.
 
 Modes:
@@ -55,15 +82,28 @@ Modes:
   --probe-usage   read `claude -p /usage` once and store the Fable window (normally run in background).
   --install       make truegauge the status line in settings.json; the previous line is saved first.
   --uninstall     put the previous line back (or remove the key if there was none).
-  --status        is truegauge the active line in that settings.json, is a previous line saved.
+  --status        is truegauge the active line in that settings.json, is a previous line saved, are the hooks set.
                   (all three take [--settings PATH]; default ~/.claude/settings.json or
                   $CLAUDE_CONFIG_DIR/settings.json. Every write is preceded by a backup copy.)
-Config (environment): TRUEGAUGE_HOME (state dir, default ~/.truegauge), TRUEGAUGE_LANG (en|ru),
+  --hook          Claude Code hook (PostToolUse, UserPromptSubmit): tells the AGENT, once per threshold, that the plan
+                  limit is high (0.4). --install sets the two hooks too; `--install --no-agent-hook` leaves them out.
+Agent warning (0.4): TRUEGAUGE_AGENT_AT = comma-separated thresholds, default `80,90,95` (integers 1..100), or `off`.
+  A window (five_hour, seven_day) is at the level of the largest threshold <= its used share (80.0 counts, 79.99 does
+  not). Each session (the hook's session_id) is told once per level and window (HOME/agent_warned.json, keyed by
+  session and by the window's resets_at): a background `claude -p` cannot use up the warning meant for the main session.
+Config (environment): TRUEGAUGE_HOME (state dir, default ~/.truegauge; with another CLAUDE_CONFIG_DIR than ~/.claude and
+  no TRUEGAUGE_HOME: ~/.truegauge/cfg-<8 hex of the folder's path>/), TRUEGAUGE_LANG (en|ru),
+  TRUEGAUGE_DIM_COLOR (`#rrggbb`, default #626262, `ansi` or `off`),
   TRUEGAUGE_FABLE (1|0), TRUEGAUGE_PROBE_S, TRUEGAUGE_MAX_AGE_S, TRUEGAUGE_RED_5H, TRUEGAUGE_RED_7D,
-  TRUEGAUGE_RED_COLOR, TRUEGAUGE_COLD_COLOR, TRUEGAUGE_MARK, NO_COLOR.
+  TRUEGAUGE_RED_COLOR, TRUEGAUGE_COLD_COLOR, TRUEGAUGE_FRESH_COLOR (`#rrggbb`, default #4eba65, `ansi` or `off`),
+  TRUEGAUGE_TIME (short|full), TRUEGAUGE_MARK, TRUEGAUGE_AGENT_AT, NO_COLOR.
+The Fable probe is skipped while nothing happens (0.4): it runs only when a reply has arrived since the last probe
+(an idle session cannot have moved its Fable share from this machine; one probe costs about 3 s of CPU and ~400 MB
+for those seconds).
 Stdlib only. License: Apache-2.0.
 """
 import glob
+import hashlib
 import json
 import math
 import os
@@ -74,9 +114,27 @@ import sys
 import time
 from datetime import datetime
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
-HOME = os.environ.get("TRUEGAUGE_HOME") or os.path.join(os.path.expanduser("~"), ".truegauge")
+def _home(environ=None):
+    """The state directory. TRUEGAUGE_HOME wins. Otherwise ~/.truegauge for Claude Code's default settings folder, and
+    ~/.truegauge/cfg-<8 hex of the folder's path> for any other CLAUDE_CONFIG_DIR (0.4): another settings folder is
+    another login, and two accounts must never share one record of plan windows."""
+    env = os.environ if environ is None else environ
+    if env.get("TRUEGAUGE_HOME"):
+        return env["TRUEGAUGE_HOME"]
+    user = os.path.expanduser("~")
+    base = os.path.join(user, ".truegauge")
+    cfg = (env.get("CLAUDE_CONFIG_DIR") or "").strip()
+    if not cfg:
+        return base
+    key = os.path.normcase(os.path.realpath(os.path.expanduser(cfg)))  # junctions, short names and case: one folder, one key
+    if key == os.path.normcase(os.path.realpath(os.path.join(user, ".claude"))):
+        return base
+    return os.path.join(base, "cfg-" + hashlib.sha256(key.encode("utf-8", "surrogateescape")).hexdigest()[:8])
+
+
+HOME = _home()
 STATE = os.path.join(HOME, "state.json")
 ERRLOG = os.path.join(HOME, "errors.log")
 SESS_DIR = os.path.join(HOME, "sessions")
@@ -189,14 +247,19 @@ class _Lock(object):
         self.close()
 
 
-def _record_error(msg):
-    """The failure goes into the state file; if that fails too, into a capped sidecar log."""
+def _record_error(msg, extra=False):
+    """The failure goes into the state file; if that fails too, into a capped sidecar log.
+    extra=True: a fault of an EXTRA of the line (colours, the cache and context records, the session count, the start
+    of the Fable probe). It is kept apart, in `last_extra_error`, which read_state does not read: such a fault never
+    marks the plan numbers as old (README "Dim numbers": dim means four things, and a fault of an extra is none of
+    them). Before this split one recorded extra fault made the live numbers dim and rounded down for one redraw
+    (found by the stand, 2026-10-15). `last_error` keeps the faults that concern the readings themselves."""
     now = int(time.time())
     try:
         with _Lock():
             d, problem = _read()
             if problem in (None, "missing"):
-                d["last_error"] = {"at": now, "msg": str(msg)[:300]}
+                d["last_extra_error" if extra else "last_error"] = {"at": now, "msg": str(msg)[:300]}
                 _save(d)
                 return
     except Exception:
@@ -246,18 +309,20 @@ def _valid(item):
             and _num(item.get("resets_at")) is not None)
 
 
-def update(payload, now=None, response_at=None):
+def update(payload, now=None, response_at=None, spent_at=None, fable_at=None):
     """Merge one status-line payload into the state file. Returns the state after the merge.
     response_at: epoch of the last API reply in the main transcript -- the plan numbers in the payload come from a
-    reply, so they are confirmed current as of that moment even when they did not change."""
+    reply, so they are confirmed current as of that moment even when they did not change.
+    spent_at / fable_at (0.4): the last reply of this session (subagents included) / the last one made by a Fable model;
+    spent_at defaults to response_at."""
     if not isinstance(payload, dict):
         raise ValueError("status-line payload is not a JSON object")
     now = time.time() if now is None else now
     with _Lock():
-        return _update_locked(payload, now, response_at)
+        return _update_locked(payload, now, response_at, spent_at, fable_at)
 
 
-def _update_locked(payload, now, response_at=None):
+def _update_locked(payload, now, response_at=None, spent_at=None, fable_at=None):
     d, problem = _read()
     if problem == "unreadable":
         raise OSError("state file stayed unreadable after retries; update skipped, old state kept")
@@ -273,12 +338,21 @@ def _update_locked(payload, now, response_at=None):
                                                    % (sorted(map(str, rl))[:10], bad))[:300]}
     changed = False
     seen = d.get("received_at") if isinstance(d.get("received_at"), dict) else {}
+    moved = d.get("changed_at") if isinstance(d.get("changed_at"), dict) else {}
     for w, new in got.items():
         old = d.get(w)
         if not _valid(old) or (new["resets_at"], new["used_percentage"]) > (old["resets_at"], old["used_percentage"]):
+            if _valid(old):
+                moved[w] = int(now)  # 0.4: the number GREW (spent on this account, here or anywhere); a first sighting may be a replay
             d[w], changed = new, True
         seen[w] = int(now)  # this window is still being SENT (a window no longer sent goes stale on its own)
     d["received_at"] = seen
+    d["changed_at"] = moved
+    sid = _sid8(payload)
+    if "five_hour" in got and sid is not None:  # 0.4: THIS session's source sends the 5-hour window (see statusline)
+        d["five_hour_sids"] = _recent_sids(_five_hour_sids(d), sid, now)
+    if got:  # a reply in a session without plan windows (API-key billing) spends nothing of the plan
+        _activity_apply(d, now, response_at if spent_at is None else spent_at, fable_at)
     if changed and problem == "corrupt":
         # first sighting after a damaged state may be an idle session's replay: no fresh point until a number moves.
         # A MISSING state (first install) is taken as fresh -- otherwise every new user starts with "<=".
@@ -293,9 +367,57 @@ def _update_locked(payload, now, response_at=None):
     return d
 
 
+SIDS_KEEP = 64  # sessions remembered as having sent the 5-hour window; the oldest go first
+SIDS_DAYS = 14
+
+
+def _five_hour_sids(d):
+    """{sid8: last time this session sent the 5-hour window} from the state dict; a damaged record is empty."""
+    rec = d.get("five_hour_sids")
+    if not isinstance(rec, dict):
+        return {}
+    return {k: int(v) for k, v in rec.items() if isinstance(k, str) and k and _num(v) is not None}
+
+
+def _recent_sids(rec, sid, now):
+    rec = dict(rec)
+    rec[sid] = int(now)
+    keep = sorted((k for k in rec if rec[k] > now - SIDS_DAYS * 86400), key=lambda k: rec[k], reverse=True)[:SIDS_KEEP]
+    return {k: rec[k] for k in keep}
+
+
+def _heard_five(sid):
+    """True when THIS session has sent the 5-hour window at least once (a later silence is then a reset, not a source
+    without plan limits). A missing, damaged or unreadable state reads as {}: False, the silent-source rule holds."""
+    return sid is not None and sid in _five_hour_sids(_read()[0])
+
+
+FABLE_MODEL = "fable"  # a session whose model id contains this word spends the Fable allowance
+
+
+def _activity_apply(d, now, spent_at, fable_at):
+    """0.4: `active` = {any: t, fable: t} -- the last reply THIS account got in any window on this machine (fable: a reply
+    made by a Fable model, read from the reply itself in the transcript). An idle session re-sends an old time, which
+    never moves the mark back; a time more than 60 s in the future is ignored."""
+    act = d.get("active") if isinstance(d.get("active"), dict) else {}
+    for k, t in (("any", spent_at), ("fable", fable_at)):
+        t = _num(t)
+        if t is None or t > now + 60:
+            continue
+        t = int(min(t, now))
+        if t > (_num(act.get(k)) or 0):
+            act[k] = t
+    d["active"] = act
+
+
+def _lit(v, at, now, max_age_s):
+    """A group is bright when its reading is fresh AND the account was spent on it within max_age_s (0.4)."""
+    return v.get("status") == "fresh" and at is not None and -60 <= now - at <= max_age_s
+
+
 def _orphans(now):
     n = 0
-    for p in glob.glob(STATE + ".tmp*"):
+    for p in glob.glob(STATE + ".tmp*") + glob.glob(_warned_path() + ".tmp*"):
         try:
             if now - os.path.getmtime(p) > 60:
                 n += 1
@@ -321,6 +443,12 @@ def read_state(now=None, max_age_s=None):
                     "recovered_from_corrupt_at": d.get("recovered_from_corrupt_at")}}
     upd = _num(d.get("updated_at"))
     rec = d.get("received_at") if isinstance(d.get("received_at"), dict) else {}
+    act = d.get("active") if isinstance(d.get("active"), dict) else {}
+    moved = d.get("changed_at") if isinstance(d.get("changed_at"), dict) else {}
+
+    def last(*ts):
+        ts = [x for x in map(_num, ts) if x is not None and x <= now + 60]  # a time from the future (clock set back) masks nothing
+        return max(ts) if ts else None
     for w in WINDOWS:
         item = d.get(w)
         if _valid(item):
@@ -329,6 +457,9 @@ def read_state(now=None, max_age_s=None):
             if r is None or now - r > max_age_s:
                 why = "this window has not been sent for over %d s" % max_age_s
             res[w] = _judge(item["used_percentage"], item["resets_at"], upd, now, max_age_s, why)
+            res[w]["sent_age_s"] = None if r is None else max(0, int(now - r))
+            res[w]["spent_at"] = last(act.get("any"), moved.get(w))
+            res[w]["active"] = _lit(res[w], res[w]["spent_at"], now, max_age_s)
     fb = d.get("fable")
     if isinstance(fb, dict) and _num(fb.get("used_percentage")) is not None and _num(fb.get("read_at")) is not None:
         # Fable has no machine-readable reset; when /usage printed the same reset text for Fable and the week, the
@@ -344,6 +475,9 @@ def read_state(now=None, max_age_s=None):
             if rst is None and v["status"] == "stale_reading":
                 # without a reset time an "at most" bound may outlive the window: say nothing rather than a bound
                 v = {"status": "unknown", "why": "Fable reading is old and its reset time is unknown"}
+            else:
+                v["spent_at"] = last(act.get("fable"), fb.get("changed_at"))
+                v["active"] = _lit(v, v["spent_at"], now, max_age_s)
             res["fable"] = v
     elif isinstance(fb, dict) and fb.get("absent"):
         res["fable"] = {"status": "absent"}
@@ -355,6 +489,7 @@ def read_state(now=None, max_age_s=None):
 
 def _judge(pct, rst, reading_at, now, max_age_s, extra_why):
     v = {"resets_at": None if rst is None else int(rst), "resets_in_s": None if rst is None else int(rst - now)}
+    v["reading_age_s"] = None if reading_at is None else max(0, int(now - reading_at))
     if rst is not None and rst <= now:
         v.update(status="expired", last_seen_used_percentage=pct, remaining_percentage=None)
         return v
@@ -462,6 +597,13 @@ def probe_usage(now=None, runner=None):
                 fb = {"used_percentage": pct, "read_at": int(now), "reset_text": rtext, "same_reset_as_week": same}
                 if same and _valid(week) and week["resets_at"] > now:
                     fb["resets_at"] = int(week["resets_at"])  # the week known AT PROBE TIME, see read_state
+                prev = d.get("fable") if isinstance(d.get("fable"), dict) else {}
+                prev_pct, prev_at = _num(prev.get("used_percentage")), _num(prev.get("read_at"))
+                close = prev_at is not None and 0 <= now - prev_at <= 2 * max(120, _env_int("TRUEGAUGE_PROBE_S", 600))
+                if prev_pct is not None and pct > prev_pct and close:
+                    fb["changed_at"] = int(now)  # 0.4: the share GREW since a recent read (a drop is a new week; a long gap hides when it was spent)
+                elif _num(prev.get("changed_at")) is not None:
+                    fb["changed_at"] = int(prev["changed_at"])
                 d["fable"] = fb
                 d.pop("probe_error", None)
             d["probe_done_at"] = int(now)
@@ -478,7 +620,7 @@ def probe_usage(now=None, runner=None):
                     return None
         except Exception:
             pass
-        _record_error("probe: %s: %s" % (type(e).__name__, e))
+        _record_error("probe: %s: %s" % (type(e).__name__, e), extra=True)  # the probe is an extra, as its start
         return None
 
 
@@ -498,6 +640,11 @@ def maybe_start_probe(now=None, spawn=None):
         if started > done and now - started < 300:
             return False
         if now - max(started, done) < every:
+            return False
+        upd = _num(d.get("updated_at"))
+        if done and (upd is None or upd <= started):
+            # idle (0.4): no reply since the last probe STARTED (a reply during a probe may postdate its read), so the
+            # Fable share cannot have moved from this machine
             return False
         d["probe_started_at"] = int(now)
         _save(d)
@@ -605,6 +752,9 @@ def _tally_file(path, rec, key=None):
         ts = _epoch(obj.get("timestamp"))
         if ts is not None and ts > (st.get("last_reply_at") or 0):
             st["last_reply_at"] = ts
+        model = m.get("model")
+        if ts is not None and isinstance(model, str) and FABLE_MODEL in model.lower() and ts > (st.get("last_fable_at") or 0):
+            st["last_fable_at"] = ts  # 0.4: the reply itself was made by a Fable model (a model switch alone is not a reply)
     st["offset"] += end + 1
     return True
 
@@ -653,8 +803,12 @@ def session_tokens(transcript_path, session_id):
     if bad:
         complete = False  # an unreadable line may have carried tokens: the count is a lower bound
     main = rec.get(_file_key(transcript_path)) or {}
+    spent = [x for x in (_num(s.get("last_reply_at")) for s in rec.values()) if x is not None]
+    fable = [x for x in (_num(s.get("last_fable_at")) for s in rec.values()) if x is not None]
     return {"new": new, "cache_read": cr, "files": len(rec), "complete": complete, "bad_lines": bad,
-            "last_reply_at": main.get("last_reply_at")}
+            "last_reply_at": main.get("last_reply_at"),
+            # 0.4: the last reply of the main transcript OR a subagent (any reply spends the account); the same for Fable
+            "last_spend_at": max(spent) if spent else None, "last_fable_at": max(fable) if fable else None}
 
 
 # ---------------------------------------------------------------- rendering
@@ -672,13 +826,18 @@ def _half_up(x):
     return int(math.floor(x + 0.5))
 
 
-def fmt_left(sec, w, days_only=False):
+def fmt_left(sec, w, days_only=False, full=False):
     """Time left, one unit, rounded DOWN: >= 1 day -> days, >= 1 h -> hours, else minutes (min 0m).
-    days_only (the week): always days, `0d` in the last day -- so the week group can never look like the 5-hour one."""
+    days_only (the week): always days, `0d` in the last day -- so the week group can never look like the 5-hour one.
+    full (TRUEGAUGE_TIME=full, 0.4): the next unit too, also rounded down -- `6d14h`, `0d14h`, `4h25m`; under 1 h `37m`."""
     sec = max(0, int(sec))
     if days_only or sec >= 86400:
+        if full:
+            return "%d%s%d%s" % (sec // 86400, w["d"], sec % 86400 // 3600, w["h"])
         return "%d%s" % (sec // 86400, w["d"])
     if sec >= 3600:
+        if full:
+            return "%d%s%d%s" % (sec // 3600, w["h"], sec % 3600 // 60, w["m"])
         return "%d%s" % (sec // 3600, w["h"])
     return "%d%s" % (sec // 60, w["m"])
 
@@ -712,11 +871,23 @@ def _pct_int(x, floor=False):
     return math.floor(x) if floor else _half_up(x)
 
 
-def _used(v):
+def _used(v, sign=True):
     """Used share: fresh -> the rounded number; a stale reading can only have grown, so its old value is a
-    LOWER bound: `>=` and the number rounded DOWN (never above the reading). Expired -> 0 (nothing used yet)."""
+    LOWER bound: the number rounded DOWN (never above the reading), drawn dim (0.4) -- or, when the line has no dim
+    colour (sign=True: NO_COLOR, TRUEGAUGE_DIM_COLOR=off), with `>=` in front, as before 0.4."""
     stale = v.get("status") != "fresh"  # render passes nothing but fresh and stale_reading
-    return "%s%d%%" % (GE if stale else "", _pct_int(v["used_percentage"], floor=stale))
+    return "%s%d%%" % (GE if stale and sign else "", _pct_int(v["used_percentage"], floor=stale))
+
+
+def _dim_of(cc):
+    """The dim colour the line may use, or None: then nothing is dimmed and an old number keeps its sign instead."""
+    if cc is None or cc.get("no_color"):
+        return None
+    return cc.get("dim_sgr")
+
+
+def _dimmed(group, dim):
+    return dim + group + RED_RESET
 
 
 # ---------------------------------------------------------------- colour (0.2)
@@ -727,6 +898,12 @@ RED_ANSI = "\033[1;31m"
 RED_DEFAULT_RGB = "#ff0000"
 COLD_DEFAULT_RGB = "#b1b9f9"  # blue of Claude Code's own "/clear to save" hint (theme key suggestion, dark theme): the context group when the main session's prompt cache is cold (0.3)
 COLD_ANSI = "\033[1;94m"
+FRESH_DEFAULT_RGB = "#4eba65"  # Claude Code's own "success" green (theme key success, dark theme, read from claude.exe 2.1.293): the 5-hour group right after a reset (0.4)
+FRESH_ANSI = "\033[1;92m"
+DIM_DEFAULT_RGB = "#626262"  # 0.4: a number not being spent now / old / incomplete; darker than the rgb(153,153,153) Claude Code draws the line in (dark theme, measured)
+DIM_ANSI = "\033[90m"  # bright black of your terminal theme, no bold
+TIME_MODES = ("short", "full")  # TRUEGAUGE_TIME (0.4): one unit (default) or two units everywhere
+FIVE_HOURS = 5 * 3600
 MARK_ITEMS = ("underline", "braces", "bold")  # TRUEGAUGE_MARK (0.3): marks that do not need colour; canonical order
 UL_ON, UL_OFF = "\033[4m", "\033[24m"  # underline on / off (off touches nothing else)
 BOLD_ON, BOLD_OFF = "\033[1m", "\033[22m"  # bold on / off (off touches nothing else)
@@ -775,6 +952,50 @@ def _cold_sgr(raw):
     return _rgb(COLD_DEFAULT_RGB), "%r (#rrggbb, ansi or off)" % raw
 
 
+def _fresh_sgr(raw):
+    """-> (escape sequence | None for off, refusal | None) for TRUEGAUGE_FRESH_COLOR. Unset or empty = default, silently."""
+    s = (raw or "").strip()
+    if not s:
+        return _rgb(FRESH_DEFAULT_RGB), None
+    if s.lower() in ("off", "0"):
+        return None, None
+    if s.lower() == "ansi":
+        return FRESH_ANSI, None
+    if re.fullmatch(r"#[0-9a-fA-F]{6}", s):
+        return _rgb(s), None
+    return _rgb(FRESH_DEFAULT_RGB), "%r (#rrggbb, ansi or off)" % raw
+
+
+def _plain_rgb(hexcolor):
+    """Foreground only, no bold: a dim number must not stand out."""
+    return "\033[38;2;%d;%d;%dm" % tuple(int(hexcolor[i:i + 2], 16) for i in (1, 3, 5))
+
+
+def _dim_sgr(raw):
+    """-> (escape sequence | None for off, refusal | None) for TRUEGAUGE_DIM_COLOR. Unset or empty = default, silently."""
+    s = (raw or "").strip()
+    if not s:
+        return _plain_rgb(DIM_DEFAULT_RGB), None
+    if s.lower() in ("off", "0"):
+        return None, None
+    if s.lower() == "ansi":
+        return DIM_ANSI, None
+    if re.fullmatch(r"#[0-9a-fA-F]{6}", s):
+        return _plain_rgb(s), None
+    return _plain_rgb(DIM_DEFAULT_RGB), "%r (#rrggbb, ansi or off)" % raw
+
+
+def _time_mode(raw):
+    """-> (mode, refusal | None) for TRUEGAUGE_TIME: `short` (one unit, the default) or `full` (two units). Unset or
+    empty = short, silently; case and edge spaces do not matter; anything else = short + refusal."""
+    s = (raw or "").strip().lower()
+    if not s:
+        return "short", None
+    if s in TIME_MODES:
+        return s, None
+    return "short", "%r (short or full)" % raw
+
+
 def _mark(raw):
     """-> (mark, refusal | None) for TRUEGAUGE_MARK. mark = "off" or the chosen items in canonical order joined by
     commas (`underline,braces,bold`). The setting is a comma-separated list of underline, braces, bold, or `all`, or
@@ -816,8 +1037,17 @@ def color_config(environ=None):
     mark, bad = _mark(env.get("TRUEGAUGE_MARK"))
     if bad:
         refused["TRUEGAUGE_MARK"] = bad
+    fresh_sgr, bad = _fresh_sgr(env.get("TRUEGAUGE_FRESH_COLOR"))
+    if bad:
+        refused["TRUEGAUGE_FRESH_COLOR"] = bad
+    tmode, bad = _time_mode(env.get("TRUEGAUGE_TIME"))
+    if bad:
+        refused["TRUEGAUGE_TIME"] = bad
+    dim_sgr, bad = _dim_sgr(env.get("TRUEGAUGE_DIM_COLOR"))
+    if bad:
+        refused["TRUEGAUGE_DIM_COLOR"] = bad
     return {"no_color": bool(env.get("NO_COLOR")), "th": th, "sgr": sgr, "cold_sgr": cold_sgr, "mark": mark,
-            "refused": refused}
+            "fresh_sgr": fresh_sgr, "time": tmode, "dim_sgr": dim_sgr, "refused": refused}
 
 
 def _reached(v, threshold):
@@ -886,35 +1116,56 @@ def _decorate(group, paint, mark):
     return group
 
 
-def render(st, tokens, ctx_pct, lang="en", ctx_tokens=None, cold=False, ctx_last=None):
+def render(st, tokens, ctx_pct, lang="en", ctx_tokens=None, cold=False, ctx_last=None, fresh_ok=True):
     """`4h 38% 3d 54% F4% T548K 55% Σ2.6M`: 5-hour window, week, Fable, tokens in the window now, context fill,
     session total. A group whose data is unknown is left out, never shown as 0. cold: the main session's cache has
     gone cold (see _cache_cold) -- the context group is drawn blue. ctx_last: the saved reading of THIS session (see
-    _stale_context); used only when Claude Code sends no reading now, drawn with `<=` (an upper bound)."""
+    _stale_context); used only when Claude Code sends no reading now, drawn with `<=` (an upper bound).
+    fresh_ok (0.4): False when the 5-hour source is silent (see statusline): a reset window is then left out, not `5h`."""
     w = WORDS.get(lang, WORDS["en"])
     try:
         cc = color_config()
     except Exception as e:  # SF4 config: a colour fault costs the colour, never the line
-        _record_error("colour config: %s: %s" % (type(e).__name__, e))
+        _record_error("colour config: %s: %s" % (type(e).__name__, e), extra=True)
         cc = None
     parts = []
+    full = cc is not None and cc.get("time") == "full"
+    dim = _dim_of(cc)
+    signs = dim is None  # no dim colour: an old number keeps its pre-0.4 sign (`>=`, `<=`), the meaning is not lost
     for key in ("five_hour", "seven_day"):
         v = st.get(key)
-        # an expired window is left out: after the reset nothing is known until a new reading (usage from
+        if key == "five_hour" and v and v["status"] == "expired" and fresh_ok:
+            # 0.4: the 5-hour window has reset and no new reading has come: nothing measured here since -> `5h` with NO
+            # percent (the Claude web app or another machine may have opened it: then time and share are unknown), green. A live
+            # reading always carries a percent, so the missing percent tells the two apart (a live `5h 0%` is possible).
+            group = fmt_left(FIVE_HOURS, w, full=full)
+            if cc is not None:
+                try:
+                    group = _decorate(group, None if cc["no_color"] else cc.get("fresh_sgr"), "off")
+                except Exception as e:  # SF4 paint: the group stays without colour
+                    _record_error("fresh paint: %s: %s" % (type(e).__name__, e), extra=True)
+            parts.append(group)
+            continue
+        # an expired week is left out: after the reset nothing is known until a new reading (usage from
         # the Claude web app or another session counts too), so "0%" would be a guess shown as a number
         if not v or v["status"] not in ("fresh", "stale_reading"):
             continue
-        group = "%s %s" % (fmt_left(v["resets_in_s"], w, days_only=(key == "seven_day")), _used(v))
+        group = "%s %s" % (fmt_left(v["resets_in_s"], w, days_only=(key == "seven_day"), full=full), _used(v, signs))
+        red = False
         if cc is not None:
             try:
                 if _reached(v, cc["th"][key]):
                     group = _decorate(group, None if cc["no_color"] else cc["sgr"], cc["mark"])
+                    red = True
             except Exception as e:  # SF4 paint: the group stays without colour
-                _record_error("colour paint: %s: %s" % (type(e).__name__, e))
+                _record_error("colour paint: %s: %s" % (type(e).__name__, e), extra=True)
+        if dim and not red and not v.get("active"):  # 0.4: red wins; otherwise a number not being spent now is dim
+            group = _dimmed(group, dim)
         parts.append(group)
     fb = st.get("fable")
     if fb and fb.get("status") in ("fresh", "stale_reading"):  # expired Fable: left out until the probe reads again
-        parts.append("F" + _used(fb))
+        group = "F" + _used(fb, signs)
+        parts.append(_dimmed(group, dim) if dim and not fb.get("active") else group)
     ct = _num(ctx_tokens)
     no_reading = ct is not None and ct <= 0  # Claude Code sends 0 before the first reply and after /compact: no reading, not an empty window
     ctx = []
@@ -922,20 +1173,27 @@ def render(st, tokens, ctx_pct, lang="en", ctx_tokens=None, cold=False, ctx_last
         ctx.append(w["T"] + fmt_tokens(ct, w))
     if ctx_pct is not None and not no_reading:  # a fill with 0 tokens is not from a real reading either
         ctx.append("%d%%" % _half_up(ctx_pct))
-    if no_reading and _context_valid(ctx_last):  # the old number is an upper bound: the context only shrank since
-        ctx.append(LE + w["T"] + fmt_tokens(ctx_last["tokens"], w, up=True))
+    old_ctx = no_reading and _context_valid(ctx_last)
+    if old_ctx:  # the old number is an upper bound (the context only shrank since): rounded up, dim (0.4) or `<=`
+        le = LE if signs else ""
+        ctx.append(le + w["T"] + fmt_tokens(ctx_last["tokens"], w, up=True))
         if ctx_last["pct"] is not None:
-            ctx.append("%s%d%%" % (LE, math.ceil(ctx_last["pct"])))
+            ctx.append("%s%d%%" % (le, math.ceil(ctx_last["pct"])))
     group = " ".join(ctx)
-    if group and cold and cc is not None:  # nothing to paint when there is no reading
+    painted = False
+    if group and old_ctx and dim:  # the saved reading is not live: dim wins over blue (0.4)
+        group, painted = _dimmed(group, dim), True
+    if group and cold and cc is not None and not painted:  # nothing to paint when there is no reading
         try:
             group = _decorate(group, None if cc["no_color"] else cc["cold_sgr"], cc["mark"])
         except Exception as e:  # SF4 cold paint: the group stays without colour
-            _record_error("cold paint: %s: %s" % (type(e).__name__, e))
+            _record_error("cold paint: %s: %s" % (type(e).__name__, e), extra=True)
     if group:
         parts.append(group)
     if tokens is not None:
-        parts.append("%s%s%s" % (SIGMA, "" if tokens.get("complete", True) else GE, fmt_tokens(tokens["new"], w, down=not tokens.get("complete", True))))
+        whole = tokens.get("complete", True)
+        group = "%s%s%s" % (SIGMA, GE if signs and not whole else "", fmt_tokens(tokens["new"], w, down=not whole))
+        parts.append(group if whole or not dim else _dimmed(group, dim))
     return " ".join(parts)
 
 
@@ -949,6 +1207,7 @@ def _cfg_apply(d, cc, now):
     is invisible to a shell, so --show cannot recompute them). Only when they differ from the saved ones: the line runs
     often. -> (changed, error text | None); the text is set for a NEW non-empty refusal, once per change."""
     cfg = {"th": dict(cc["th"]), "sgr": cc["sgr"], "cold_sgr": cc["cold_sgr"], "mark": cc["mark"],
+           "fresh_sgr": cc.get("fresh_sgr"), "time": cc.get("time", "short"), "dim_sgr": cc.get("dim_sgr"),
            "no_color": bool(cc["no_color"]), "refused": dict(cc["refused"])}
     old = d.get("render_cfg")
     if _same(old, cfg):
@@ -972,7 +1231,7 @@ def _remember_render_cfg(cc, now):
         if changed:
             _save(d)
     if err:
-        _record_error(err)
+        _record_error(err, extra=True)
 
 
 def _pc_value(v):
@@ -1079,9 +1338,9 @@ def _stale_context(sid):
         return None
     if not _context_valid(rec):
         msg = "context record: damaged, treated as no reading"
-        le = d.get("last_error")
+        le = d.get("last_extra_error")
         if not (isinstance(le, dict) and le.get("msg") == msg):
-            _record_error(msg)
+            _record_error(msg, extra=True)
         return None
     return rec if sid is not None and rec["sid"] == sid else None
 
@@ -1115,7 +1374,7 @@ def _remember(payload, cc, now):
         if changed:
             _save(d)
     for e in errs:
-        _record_error(e)
+        _record_error(e, extra=True)
 
 
 def _saved_render_cfg(d):
@@ -1127,7 +1386,10 @@ def _saved_render_cfg(d):
               and all(c["th"].get(k) is None or isinstance(c["th"][k], int) for k in RED_VARS)
               and all(k in c["th"] for k in RED_VARS)
               # 0.3 keys: absent in a record written by 0.2 (then --show says nothing about them), wrong shape = damaged
-              and (c.get("cold_sgr") is None or isinstance(c["cold_sgr"], str)) and _mark_valid(c.get("mark", "off")))
+              and (c.get("cold_sgr") is None or isinstance(c["cold_sgr"], str)) and _mark_valid(c.get("mark", "off"))
+              # 0.4 keys: absent in a record written by 0.3 or earlier
+              and (c.get("fresh_sgr") is None or isinstance(c["fresh_sgr"], str)) and c.get("time", "short") in TIME_MODES
+              and (c.get("dim_sgr") is None or isinstance(c["dim_sgr"], str)))
     except (KeyError, TypeError):
         ok = False
     return (c, _num(d.get("render_cfg_at"))) if ok else (None, None)
@@ -1139,25 +1401,26 @@ def statusline(payload, now=None):
     try:
         tokens = session_tokens(payload.get("transcript_path"), payload.get("session_id"))
     except Exception as e:
-        _record_error("tokens: %s: %s" % (type(e).__name__, e))
-    update(payload, now, (tokens or {}).get("last_reply_at"))
+        _record_error("tokens: %s: %s" % (type(e).__name__, e), extra=True)
+    tk = tokens or {}
+    update(payload, now, tk.get("last_reply_at"), tk.get("last_spend_at"), tk.get("last_fable_at"))
     try:
         maybe_start_probe(now)
     except Exception as e:  # the probe is an extra; its failure must not cost the main line
-        _record_error("probe start: %s: %s" % (type(e).__name__, e))
+        _record_error("probe start: %s: %s" % (type(e).__name__, e), extra=True)
     try:
         cc = color_config()
     except Exception as e:  # an extra; its failure must not cost the main line
-        _record_error("colour settings: %s: %s" % (type(e).__name__, e))
+        _record_error("colour settings: %s: %s" % (type(e).__name__, e), extra=True)
         cc = None
     try:
         _remember(payload, cc, now)
     except Exception as e:  # the state file could not be read or written: the main line stays
-        _record_error("state record: %s: %s" % (type(e).__name__, e))
+        _record_error("state record: %s: %s" % (type(e).__name__, e), extra=True)
     try:
         cold = _cache_cold(payload.get("prompt_cache"), now)
     except Exception as e:  # SF4 cold test: no colour, the line stays
-        _record_error("cold test: %s: %s" % (type(e).__name__, e))
+        _record_error("cold test: %s: %s" % (type(e).__name__, e), extra=True)
         cold = False
     st = read_state(now)
     cw = payload.get("context_window")
@@ -1168,8 +1431,19 @@ def statusline(payload, now=None):
         try:
             last = _stale_context(_sid8(payload))
         except Exception as e:  # SF4 context record: no group, the line stays
-            _record_error("context record: %s: %s" % (type(e).__name__, e))
-    return render(st, tokens, ctx, os.environ.get("TRUEGAUGE_LANG", "en"), cti, cold, last)
+            _record_error("context record: %s: %s" % (type(e).__name__, e), extra=True)
+    rl = payload.get("rate_limits")
+    # 0.4: a reply has come in THIS session, yet Claude Code has never sent a 5-hour reading in it (API-key billing,
+    # another account, a Claude Code that dropped the field): the source is silent, so a reset window is not drawn as a
+    # whole `5h`. A window this session DID receive is a reset when it stops coming: after a reset Claude Code was seen
+    # sending no 5-hour window in a working session (2026-10-15, before the next reply), so `5h` stays.
+    silent5 = (tokens or {}).get("last_reply_at") is not None and not (isinstance(rl, dict) and isinstance(rl.get("five_hour"), dict))
+    if silent5:
+        try:
+            silent5 = not _heard_five(_sid8(payload))
+        except Exception as e:  # an extra; its failure keeps the silent-source rule, never costs the line
+            _record_error("sessions record: %s: %s" % (type(e).__name__, e), extra=True)
+    return render(st, tokens, ctx, os.environ.get("TRUEGAUGE_LANG", "en"), cti, cold, last, fresh_ok=not silent5)
 
 
 def _th_name(n):
@@ -1248,6 +1522,13 @@ def show():
     st = read_state()
     t = st["_tap"]
     print("truegauge %s  state: %s" % (__version__, STATE))
+    if not os.environ.get("TRUEGAUGE_HOME"):
+        if (os.environ.get("CLAUDE_CONFIG_DIR") or "").strip():
+            print("account: CLAUDE_CONFIG_DIR=%s -> %s" % (os.environ["CLAUDE_CONFIG_DIR"],
+                                                           "its own state folder" if _home() != _home({}) else "the default state folder"))
+        else:
+            print("account: no CLAUDE_CONFIG_DIR in this shell -> the default state folder; a Claude Code started with "
+                  "CLAUDE_CONFIG_DIR keeps its own (set the same variable before --show)")
     print("tap: file=%s last_call_age_s=%s had_rate_limits=%s orphan_tmp=%d"
           % (t["file"], t["last_call_age_s"], t["last_call_had_rate_limits"], t["orphan_tmp"]))
     for k in ("unresolved_error", "last_rejected", "recovered_from_corrupt_at", "probe_error"):
@@ -1262,6 +1543,8 @@ def show():
              "; REFUSED (default used): %s" % "; ".join("%s=%s" % kv for kv in sorted(cc["refused"].items()))
              if cc["refused"] else ""))
     print("cold colour: %s; mark: %s" % ("off" if cc["cold_sgr"] is None else cc["cold_sgr"].replace("\033", "ESC"), cc["mark"]))
+    print("fresh 5h colour: %s; time: %s" % ("off" if cc["fresh_sgr"] is None else cc["fresh_sgr"].replace("\033", "ESC"), cc["time"]))
+    print("dim colour: %s" % ("off" if cc["dim_sgr"] is None else cc["dim_sgr"].replace("\033", "ESC")))
     print("colour: values of THIS shell; an `env` block in settings.json is seen only by the status line itself")
     if rc is None:
         print("status line colour: unknown (the status line has not recorded its colour settings yet)")
@@ -1275,8 +1558,14 @@ def show():
     if rc is not None and "mark" in rc:
         print("status line cold colour: %s; mark: %s"
               % ("off" if rc.get("cold_sgr") is None else rc["cold_sgr"].replace("\033", "ESC"), rc["mark"]))
+    if rc is not None and "time" in rc:
+        print("status line fresh 5h colour: %s; time: %s"
+              % ("off" if rc.get("fresh_sgr") is None else rc["fresh_sgr"].replace("\033", "ESC"), rc["time"]))
+    if rc is not None and "dim_sgr" in rc:
+        print("status line dim colour: %s" % ("off" if rc["dim_sgr"] is None else rc["dim_sgr"].replace("\033", "ESC")))
     _show_cache(d)
     _show_context(d)
+    _show_agent()
     judge = rc  # the status line's own settings: the shell's differ whenever `env` in settings.json is used
     for key in WINDOWS + ("fable",):
         v = st.get(key)
@@ -1301,9 +1590,20 @@ def show():
                   % (key, v["last_seen_used_percentage"]))
         else:
             print("%s: %s%s" % (key, v.get("status"), (" (%s)" % v["why"]) if v.get("why") else ""))
+        if "active" in v:
+            print("%s: being spent now: %s (last spend seen: %s; bright for %d s after it, dim otherwise)"
+                  % (key, "yes" if v["active"] else "no", "never" if v.get("spent_at") is None else _fmt_time(v["spent_at"]),
+                     _env_int("TRUEGAUGE_MAX_AGE_S", 900)))
     le = d.get("last_error")
     if isinstance(le, dict) and not t.get("unresolved_error"):
         print("tap: last error (resolved since): at %s: %s" % (le.get("at"), le.get("msg")))
+    lx = d.get("last_extra_error")
+    if isinstance(lx, dict):
+        _at = _num(lx.get("at"))
+        print("tap: last fault of an extra (colours, cache/context records, session count, Fable probe; the plan numbers "
+              "are not affected): at %s (%s): %s" % (_fmt_time(lx.get("at")),
+                                                    "age unknown" if _at is None else "%d s ago" % max(0, int(time.time() - _at)),
+                                                    lx.get("msg")))
     try:
         with open(ERRLOG, encoding="utf-8") as f:
             tail = f.read().splitlines()[-5:]
@@ -1314,6 +1614,271 @@ def show():
     except OSError:
         pass
     return 0
+
+
+# ---------------------------------------------------------------- agent warning (0.4)
+
+AGENT_VAR = "TRUEGAUGE_AGENT_AT"
+AGENT_DEFAULT = (80, 90, 95)
+AGENT_WINDOWS = ("five_hour", "seven_day")
+HOOK_EVENTS = ("PostToolUse", "UserPromptSubmit")
+AGENT_KEEP_S = 8 * 86400  # a session's record outlives every window it can refer to (the longest is 7 days)
+AGENT_KEEP_N = 200  # and at most this many sessions are kept (the most recently told)
+AGENT_SAME_WINDOW_S = 600  # resets_at values closer than this are one window (a new 5-hour window ends >= 5 h later)
+
+
+def _warned_path():
+    return os.path.join(HOME, "agent_warned.json")
+
+
+def agent_thresholds(raw):
+    """TRUEGAUGE_AGENT_AT -> (sorted tuple of thresholds | None for off, refusal | None). Unset or empty = default,
+    silently; `off` / `0` = never; one bad item (not an integer 1..100) refuses the whole value: default + the reason."""
+    s = (raw or "").strip()
+    if not s:
+        return AGENT_DEFAULT, None
+    if s == "0" or s.lower() == "off":
+        return None, None
+    items = list(map(str.strip, s.split(",")))
+    if all(re.fullmatch(r"[0-9]{1,3}", x) and 1 <= int(x) <= 100 for x in items):
+        return tuple(sorted(set(int(x) for x in items))), None
+    return AGENT_DEFAULT, "%r (integers 1..100 separated by commas, or off)" % raw
+
+
+def agent_level(pct, thresholds):
+    """The largest threshold <= the RAW used share (the boundary counts: 80.0 is level 80, 79.99 is level 0)."""
+    return max([t for t in thresholds if pct >= t], default=0)
+
+
+def _warned_ok(rec):
+    return (isinstance(rec, dict) and _num(rec.get("resets_at")) is not None
+            and isinstance(rec.get("level"), int) and not isinstance(rec.get("level"), bool))
+
+
+def _agent_pct(v, lang):
+    """`91% used` for a fresh reading; an old one can only have grown, so it is a lower bound: `at least 91% used`
+    (rounded down)."""
+    stale = v.get("status") != "fresh"
+    n = _pct_int(v["used_percentage"], stale)
+    if lang == "ru":
+        return ("не менее %d %% использовано" if stale else "%d %% использовано") % n
+    return ("at least %d%% used" if stale else "%d%% used") % n
+
+
+def _agent_age(v, lang):
+    ages = [a for a in (v.get("reading_age_s"), v.get("sent_age_s")) if a is not None]
+    age = max(ages) if ages else None  # the older of: numbers last confirmed, this window last sent
+    ru = lang == "ru"
+    if age is None:
+        return "возраст показания неизвестен" if ru else "reading age unknown"
+    if age < 60:
+        return "показание свежее минуты" if ru else "reading under 1 min old"
+    w = {"d": "д", "h": "ч", "m": "м"} if ru else WORDS["en"]
+    old = "%d %s" % (age // 60, "мин" if ru else "min") if age < 7200 else fmt_left(age, w)
+    return ("показанию %s" % old) if ru else ("reading %s old" % old)
+
+
+def agent_message(st, lang="en"):
+    """One line about both plan windows (those with a usable reading). Statements, not commands."""
+    ru = lang == "ru"
+    w = {"d": "д", "h": "ч", "m": "м"} if ru else WORDS["en"]
+    names = {"five_hour": ("5-часовое окно", "5-hour window"), "seven_day": ("недельное окно", "weekly window")}
+    parts = []
+    for key in AGENT_WINDOWS:
+        v = st.get(key)
+        if not v or v.get("status") not in ("fresh", "stale_reading"):
+            continue
+        left = fmt_left(v["resets_in_s"], w, days_only=key == "seven_day")
+        pct = _agent_pct(v, lang)
+        if v["status"] != "fresh":
+            pct += " (%s)" % _agent_age(v, lang)
+        if ru:
+            parts.append("%s %s, сброс через %s" % (names[key][0], pct, left))
+        else:
+            parts.append("%s %s, resets in %s" % (names[key][1], pct, left))
+    if not parts:
+        return None
+    return ("Лимит плана Claude (truegauge): " if ru else "Claude plan usage (truegauge): ") + "; ".join(parts) + "."
+
+
+def agent_decide(st, thresholds, warned, lang="en"):
+    """The ONE decision, pure. -> (text | None, new_warned). Speaks when some window's level is above the level already
+    announced for the SAME window (resets_at within AGENT_SAME_WINDOW_S; a new window starts from 0); a jump 80 -> 91 is
+    one message of level 90.
+    Expired / unknown windows have no level. When it speaks, the levels of all windows with a reading are recorded."""
+    new = dict(warned) if isinstance(warned, dict) else {}
+    if thresholds is None:
+        return None, new
+    levels, speak = {}, False
+    for key in AGENT_WINDOWS:
+        v = st.get(key)
+        if not v or v.get("status") not in ("fresh", "stale_reading"):
+            continue
+        lvl = agent_level(v["used_percentage"], thresholds)
+        levels[key] = (v["resets_at"], lvl)
+        rec = new.get(key)
+        told = rec["level"] if _warned_ok(rec) and abs(rec["resets_at"] - v["resets_at"]) < AGENT_SAME_WINDOW_S else 0
+        if lvl > told:
+            speak = True
+    if not speak:
+        return None, new
+    text = agent_message(st, lang)
+    if text is None:
+        return None, new
+    for key, (rst, lvl) in levels.items():
+        new[key] = {"resets_at": rst, "level": lvl}
+    return text, new
+
+
+def _session_key(payload):
+    """The hook's session_id, plus `#agent_id` when the call comes from a subagent (Claude Code gives a subagent's tool
+    calls the parent's session_id and their own agent_id): the main conversation and each subagent are told apart.
+    Without a session_id every caller shares the record "" (one announcement for all of them)."""
+    sid = payload.get("session_id")
+    sid = sid if isinstance(sid, str) and sid else ""
+    aid = payload.get("agent_id")
+    return sid + "#" + aid if isinstance(aid, str) and aid else sid
+
+
+def _sessions(book):
+    s = book.get("sessions") if isinstance(book, dict) else None
+    return s if isinstance(s, dict) else {}
+
+
+def _prune(sessions, now):
+    """Drop records older than AGENT_KEEP_S or without a readable `seen`; keep the AGENT_KEEP_N - 1 most recent
+    (room for the one about to be written)."""
+    live = [(r["seen"], k) for k, r in sessions.items()
+            if isinstance(r, dict) and _num(r.get("seen")) is not None and now - r["seen"] < AGENT_KEEP_S]
+    live.sort(reverse=True)
+    return {k: sessions[k] for _, k in live[:AGENT_KEEP_N - 1]}
+
+
+def _usable(st):
+    return any(isinstance(st.get(k), dict) and st[k].get("status") in ("fresh", "stale_reading") for k in AGENT_WINDOWS)
+
+
+def _hook_note(book, outcome, now):
+    """The hook's outcome goes into the record only when it CHANGES (not on every call), with the time it began.
+    --show prints it: what the hook itself saw, including settings the shell running --show does not see. -> changed."""
+    old = book.get("hook") if isinstance(book.get("hook"), dict) else {}
+    if old.get("outcome") == outcome:
+        return False
+    book["hook"] = {"outcome": outcome, "since": int(now)}
+    return True
+
+
+def hook_output(raw, now=None):
+    """Hook stdin text -> the stdout text (JSON) or None for silence. Raises on a fault: the caller records it.
+    Every silence has a named reason, recorded on change (`_hook_note`)."""
+    payload = json.loads(raw)
+    now = time.time() if now is None else now
+    event = payload.get("hook_event_name") if isinstance(payload, dict) else None
+    thresholds, bad = agent_thresholds(os.environ.get(AGENT_VAR))
+    lang = "ru" if os.environ.get("TRUEGAUGE_LANG", "en") == "ru" else "en"
+    path = _warned_path()
+    text = None
+    with _Lock(path):
+        book, problem = _read(path)
+        if problem == "unreadable":
+            raise OSError("agent_warned.json stayed unreadable; no message")
+        damaged = problem == "corrupt" or ("sessions" in book and not isinstance(book["sessions"], dict))
+        sessions = _sessions(book)
+        if not isinstance(payload, dict):
+            outcome = "silent: hook input is not a JSON object"
+        elif event not in HOOK_EVENTS:
+            outcome = "silent: event not ours (%s)" % json.dumps(event)[:60]
+        elif thresholds is None:
+            outcome = "silent: off (TRUEGAUGE_AGENT_AT)"
+        else:
+            st = read_state(now)
+            if not _usable(st):
+                outcome = "silent: no usable plan window in state.json (file: %s)" % st["_tap"]["file"]
+            else:
+                key = _session_key(payload)
+                text, new = agent_decide(st, thresholds, sessions.get(key), lang)
+                if text is None:
+                    outcome = "silent: below the thresholds, or already told"
+                else:
+                    outcome = "spoke"
+                    new["seen"] = int(now)
+                    sessions = _prune(sessions, now)
+                    sessions[key] = new
+        if bad:
+            outcome += "; REFUSED (default used): %s=%s" % (AGENT_VAR, bad)
+        if damaged:
+            outcome += "; agent_warned.json was damaged (%s): treated as empty" % (problem or "sessions not an object")
+        out = {"sessions": sessions, "hook": book.get("hook") if isinstance(book.get("hook"), dict) else {}}
+        if _hook_note(out, outcome, now) or text is not None:
+            _save(out, path)  # recorded BEFORE it is said: a fault costs a message, never a repeat
+    if text is None:
+        return None
+    return json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}, ensure_ascii=True)
+
+
+def _record_hook_fault(msg):
+    """A hook fault goes into the hook's own slot of agent_warned.json, NOT into the state file's last_error: an error
+    there marks every window of the human's status line as an old reading, and the next redraw would call it resolved.
+    If that file cannot take it either, into the capped sidecar log."""
+    now = int(time.time())
+    try:
+        path = _warned_path()
+        with _Lock(path):
+            book, problem = _read(path)
+            if problem in (None, "missing"):
+                out = {"sessions": _sessions(book), "hook": book.get("hook") if isinstance(book.get("hook"), dict) else {}}
+                if _hook_note(out, "fault: " + str(msg)[:300], now):
+                    _save(out, path)
+                return
+    except Exception:
+        pass
+    try:
+        os.makedirs(HOME, exist_ok=True)
+        if not os.path.exists(ERRLOG) or os.path.getsize(ERRLOG) < ERRLOG_CAP:
+            with open(ERRLOG, "a", encoding="utf-8") as f:
+                f.write("%d %s\n" % (now, str(msg)[:300]))
+    except Exception:
+        pass
+
+
+def hook_mode():
+    """--hook: never raises, prints nothing but the one JSON object, always exit 0."""
+    try:
+        raw = sys.stdin.buffer.read().decode("utf-8", "replace")
+        out = hook_output(raw)
+        if out:
+            sys.stdout.buffer.write(out.encode("utf-8"))
+            sys.stdout.buffer.flush()  # a failed flush is caught here, not at interpreter exit with a non-zero code
+    except Exception as e:  # a hook must not break the agent's work; the failure is recorded, not hidden
+        _record_hook_fault("hook: %s: %s" % (type(e).__name__, e))
+    return 0
+
+
+def _show_agent():
+    thresholds, bad = agent_thresholds(os.environ.get(AGENT_VAR))
+    book, problem = _read(_warned_path())
+    sessions = _sessions(book)
+    dated = sorted(((r["seen"], k) for k, r in sessions.items() if isinstance(r, dict) and _num(r.get("seen")) is not None),
+                   reverse=True)
+    told = []
+    if dated:
+        k = dated[0][1]
+        w = sessions[k]
+        told = ["%s level %d (window ends %s)" % (n, w[n]["level"], _fmt_time(w[n]["resets_at"]))
+                for n in AGENT_WINDOWS if _warned_ok(w.get(n))]
+        told = ["%d session(s); last told %s (session %s): %s" % (len(sessions), _fmt_time(dated[0][0]),
+                                                                  k[:8] or "without id", "; ".join(told))]
+    print("agent warning: thresholds (this shell) %s%s; announced: %s%s"
+          % ("off" if thresholds is None else ",".join(map(str, thresholds)),
+             "; REFUSED (default used): %s=%s" % (AGENT_VAR, bad) if bad else "",
+             told[0] if told else "nothing yet",
+             "" if problem in (None, "missing") else " (agent_warned.json is %s: treated as empty)" % problem))
+    hk = book.get("hook") if isinstance(book, dict) and isinstance(book.get("hook"), dict) else {}
+    if isinstance(hk.get("outcome"), str):
+        print("agent hook, as the hook saw it (its environment is Claude Code's, not this shell's): %s (since %s)"
+              % (hk["outcome"], _fmt_time(hk.get("since"))))
+    else:
+        print("agent hook: no run recorded yet")
 
 
 # ---- install / uninstall: switch the status line in settings.json on and off, with a way back
@@ -1442,22 +2007,104 @@ def _our_command():
     return "%s %s" % (_quote(py), _quote(os.path.abspath(__file__).replace("\\", "/")))
 
 
-def install(path):
+def _hook_is_ours(h):
+    """One hook command of ours: it names truegauge.py and carries the --hook argument."""
+    cmd = h.get("command") if isinstance(h, dict) else None
+    return isinstance(cmd, str) and "truegauge.py" in cmd and re.search(r"(?<!\S)--hook(?!\S)", cmd) is not None
+
+
+def _entry_has_ours(entry):
+    return isinstance(entry, dict) and isinstance(entry.get("hooks"), list) and any(_hook_is_ours(h) for h in entry["hooks"])
+
+
+def _hooks_object(d):
+    hk = d.get("hooks")
+    if hk is not None and not isinstance(hk, dict):
+        raise Refuse("`hooks` in the settings file is not an object; nothing changed")
+    return hk
+
+
+def _hooks_have(d):
+    """-> {event: bool}: is one of our hook entries set for the event."""
+    hk = d.get("hooks") if isinstance(d.get("hooks"), dict) else {}
+    return {ev: isinstance(hk.get(ev), list) and any(_entry_has_ours(e) for e in hk[ev]) for ev in HOOK_EVENTS}
+
+
+def _hooks_add(d):
+    """Add our hook entry to each of HOOK_EVENTS in the dict `d`, leaving every other entry alone; an event that already
+    has one of ours is not touched (no duplicates). -> True when `d` changed. A shape we do not understand: Refuse."""
+    hk = _hooks_object(d)
+    for ev in HOOK_EVENTS:
+        if hk is not None and hk.get(ev) is not None and not isinstance(hk[ev], list):
+            raise Refuse("`hooks.%s` in the settings file is not a list; nothing changed" % ev)
+    changed = False
+    for ev in HOOK_EVENTS:
+        lst = (hk or {}).get(ev) or []
+        if any(_entry_has_ours(e) for e in lst):
+            continue
+        if hk is None:
+            hk = d["hooks"] = {}
+        hk[ev] = lst + [{"hooks": [{"type": "command", "command": _our_command() + " --hook", "timeout": 10}]}]
+        changed = True
+    return changed
+
+
+def _hooks_remove(d):
+    """Take OUR hook commands out of `d` (other hooks, also inside the same entry, stay); entries, lists and the `hooks`
+    key that our removal leaves empty are dropped, those that were empty before are not touched. -> number removed."""
+    hk = d.get("hooks")
+    if not isinstance(hk, dict):
+        return 0
+    total = 0
+    for ev in HOOK_EVENTS:
+        lst = hk.get(ev)
+        if not isinstance(lst, list):
+            continue
+        out, n = [], 0
+        for e in lst:
+            if _entry_has_ours(e):
+                keep = [h for h in e["hooks"] if not _hook_is_ours(h)]
+                n += len(e["hooks"]) - len(keep)
+                if keep:
+                    out.append(dict(e, hooks=keep))
+            else:
+                out.append(e)
+        if n:
+            total += n
+            if out:
+                hk[ev] = out
+            else:
+                del hk[ev]
+    if total and not hk:
+        del d["hooks"]
+    return total
+
+
+def install(path, agent_hook=True):
     d = _read_settings(path)
     key = os.path.abspath(path)
-    if "statusLine" in d and _is_ours(d["statusLine"]):
+    line_ours = "statusLine" in d and _is_ours(d["statusLine"])
+    hooks_added = agent_hook and _hooks_add(d)
+    if line_ours and not hooks_added:
         print("truegauge is already the status line in %s. Nothing changed." % path)
         return 0
-    entries = _prev_load()
-    entries[key] = {"had_line": "statusLine" in d, "statusLine": d.get("statusLine"),
-                    "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
-    _prev_store(entries)
-    d["statusLine"] = {"type": "command", "command": _our_command(), "refreshInterval": 60}
+    rec = None
+    if not line_ours:
+        entries = _prev_load()
+        entries[key] = {"had_line": "statusLine" in d, "statusLine": d.get("statusLine"),
+                        "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        _prev_store(entries)
+        d["statusLine"] = {"type": "command", "command": _our_command(), "refreshInterval": 60}
+        rec = entries[key]
     bak = _write_settings(path, d)
-    rec = entries[key]
-    print("truegauge is now the status line in %s" % path)
-    print("previous line: %s (saved in %s)" % (json.dumps(rec["statusLine"], ensure_ascii=False)
-                                                if rec["had_line"] else "none", _prev_file()))
+    if rec is None:
+        print("truegauge was already the status line in %s; agent-warning hooks added" % path)
+    else:
+        print("truegauge is now the status line in %s" % path)
+        print("previous line: %s (saved in %s)" % (json.dumps(rec["statusLine"], ensure_ascii=False)
+                                                    if rec["had_line"] else "none", _prev_file()))
+    if hooks_added:
+        print("agent warning: hooks set for %s (off: TRUEGAUGE_AGENT_AT=off, or --uninstall)" % ", ".join(HOOK_EVENTS))
     if bak:
         print("backup of the settings file: %s" % bak)
     print("to undo: python %s --uninstall --settings %s" % (_quote(os.path.abspath(__file__).replace("\\", "/")),
@@ -1474,8 +2121,15 @@ def _latest_backup(path):
 def uninstall(path, force=False):
     d = _read_settings(path)
     key = os.path.abspath(path)
-    if "statusLine" not in d or not _is_ours(d["statusLine"]):
-        print("truegauge is not the status line in %s. Nothing changed." % path)
+    line_ours = "statusLine" in d and _is_ours(d["statusLine"])
+    if not line_ours:
+        if not _hooks_remove(d):
+            print("truegauge is not the status line in %s. Nothing changed." % path)
+            return 0
+        bak = _write_settings(path, d)
+        print("truegauge is not the status line in %s; its agent-warning hooks removed" % path)
+        if bak:
+            print("backup of the settings file: %s" % bak)
         return 0
     entries = _prev_load()
     rec = entries.get(key)
@@ -1492,11 +2146,14 @@ def uninstall(path, force=False):
         del d["statusLine"]
         what = ("there was no status line before: key removed" if rec else
                 "no saved previous line (truegauge was added by hand): key removed")
+    hooks_gone = _hooks_remove(d)
     bak = _write_settings(path, d)
     entries.pop(key, None)
     _prev_store(entries)  # only after the settings write succeeded
     print("truegauge is off in %s" % path)
     print(what)
+    if hooks_gone:
+        print("agent-warning hooks removed")
     if bak:
         print("backup of the settings file: %s" % bak)
     return 0
@@ -1508,6 +2165,16 @@ def status(path):
     rec = _prev_load().get(os.path.abspath(path))
     print("settings: %s%s" % (path, "" if os.path.exists(path) else " (does not exist)"))
     print("truegauge is the active status line: %s" % ("yes" if ours else "no"))
+    have = _hooks_have(d)
+    print("agent-warning hooks: %s" % ", ".join("%s %s" % (ev, "yes" if have[ev] else "no") for ev in HOOK_EVENTS))
+    if d.get("disableAllHooks") is True:
+        print("NOTE: disableAllHooks is true in this file: Claude Code runs none of its hooks")
+    hk = d.get("hooks") if isinstance(d.get("hooks"), dict) else {}
+    other = sorted(set(h["command"] for ev in HOOK_EVENTS for e in (hk.get(ev) if isinstance(hk.get(ev), list) else [])
+                       if _entry_has_ours(e) for h in e["hooks"] if _hook_is_ours(h))
+                   - {_our_command() + " --hook"})
+    for c in other:
+        print("NOTE: a hook of ours runs another copy or interpreter (moved?): %s" % c)
     if not ours and "statusLine" in d:
         print("active line: %s" % json.dumps(d["statusLine"], ensure_ascii=False))
     if rec is None:
@@ -1523,7 +2190,7 @@ def settings_mode(argv):
     try:
         path = _settings_path(argv)
         if "--install" in argv:
-            return install(path)
+            return install(path, agent_hook="--no-agent-hook" not in argv)
         if "--uninstall" in argv:
             return uninstall(path, force="--force" in argv)
         return status(path)
@@ -1539,6 +2206,8 @@ def main(argv):
     if "--version" in argv:
         print(__version__)
         return 0
+    if "--hook" in argv:
+        return hook_mode()
     if "--show" in argv:
         return show()
     if any(a in argv for a in ("--install", "--uninstall", "--status")):
